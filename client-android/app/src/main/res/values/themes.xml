@@ -1,0 +1,24 @@
+<resources>
+    <style name="Theme.DisplaySwarm" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentOverlay">@null</item>
+        <item name="android:statusBarColor">@android:color/black</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+    </style>
+    <!-- Opaque, so the window below stops drawing while settings scroll: a translucent window
+         makes the compositor blend the live video under every scrolled frame, which stuttered. -->
+    <style name="Theme.DisplaySwarm.Settings" parent="Theme.MaterialComponents.NoActionBar">
+        <item name="android:windowBackground">@color/vm_bg</item>
+        <item name="android:statusBarColor">@color/vm_bg</item>
+        <item name="android:navigationBarColor">@color/vm_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="colorPrimary">@color/vm_accent</item>
+        <item name="colorOnPrimary">@color/vm_bg</item>
+        <item name="colorSecondary">@color/vm_accent</item>
+        <item name="colorSurface">@color/vm_surface</item>
+        <item name="colorOnSurface">@color/vm_text</item>
+        <item name="android:colorBackground">@color/vm_bg</item>
+    </style>
+</resources>

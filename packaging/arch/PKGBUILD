@@ -1,0 +1,28 @@
+# Maintainer: ARATAN
+# Builds from the checkout this file lives in (packaging/arch/ inside the repo):
+#   cd packaging/arch && makepkg -f
+pkgname=displayswarm
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Use an Android phone as a second display and input device'
+arch=('x86_64')
+url='https://github.com/ratan00/DisplaySwarm'
+license=('custom')
+depends=('ffmpeg' 'x264' 'pipewire' 'opus' 'libxcb' 'libx11' 'fontconfig' 'mesa'
+         'libxkbcommon' 'wayland')
+makedepends=('cargo' 'clang' 'pkgconf')
+options=('!lto')
+
+build() {
+    cd "$startdir/../../host"
+    CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$startdir/../../host/target}" \
+        cargo build --release --locked
+}
+
+package() {
+    local rel="${CARGO_TARGET_DIR:-$startdir/../../host/target}/release"
+    install -Dm755 "$rel/displayswarm" "$rel/displayswarm-hostd" -t "$pkgdir/usr/bin/"
+    install -Dm644 "$startdir/../displayswarm-hostd.service" -t "$pkgdir/usr/lib/systemd/user/"
+    install -Dm644 "$startdir/../displayswarm.desktop" -t "$pkgdir/usr/share/applications/"
+    install -Dm644 "$startdir/../../NOTICE" "$pkgdir/usr/share/licenses/$pkgname/NOTICE"
+}

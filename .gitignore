@@ -1,0 +1,50 @@
+# --- build artifacts ---
+target/
+**/build/
+.gradle/
+.kotlin/
+
+# --- local / generated config ---
+local.properties
+.codegraph/
+
+# --- archives & binaries produced by packaging ---
+*.zip
+*.tar
+*.tar.gz
+*.apk
+*.aab
+*.jar.tmp
+
+# --- IDE / OS noise ---
+.idea/
+*.iml
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- temporary scratch trees ---
+host/scratch/
+scratch/
+release/
+
+# --- logs & runtime output ---
+*.log
+nohup.out
+
+
+packaging/appimage/build/
+*.AppImage
+*.deb
+*.pkg.tar.zst
+dist/
+
+# --- release packages ---
+dist/
+.agent-target/
+packaging/arch/pkg/
+packaging/arch/src/
+*.pkg.tar.zst
+*.AppImage
+.claude/

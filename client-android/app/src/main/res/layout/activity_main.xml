@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rootContainer"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/black"
+    android:keepScreenOn="true">
+
+    <!-- Video Rendering Surface -->
+    <SurfaceView
+        android:id="@+id/videoSurface"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center" />
+
+    <!-- Plain dark surface for roles without video (Drawing tablet, Input pad). -->
+    <TextView
+        android:id="@+id/txtNoVideoHint"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#11111B"
+        android:gravity="center"
+        android:textColor="#6C7086"
+        android:textSize="18sp"
+        android:visibility="gone" />
+
+    <!--
+      Transparent Touch / Stylus / Mouse / Keyboard Interceptor Overlay.
+
+      InputOverlayView (not a plain View) because keyboard capture needs an
+      override of dispatchKeyEvent, which cannot be installed on an existing
+      View instance - see InputManager.kt for why an OnKeyListener is not
+      enough.
+
+      The three focus attributes are load-bearing, not decoration. A view has to
+      be focusable AND focusableInTouchMode AND actually hold focus before
+      dispatchKeyEvent is called at all; without focusableInTouchMode the view
+      cannot take focus while the device is in touch mode, so every hardware or
+      Bluetooth keystroke would fall through to the Activity and be lost.
+      InputManager.attach() additionally calls requestFocus(), because the touch
+      listener below consumes events and so the framework's own
+      touch-to-focus path never runs.
+    -->
+    <com.displayswarm.client.InputOverlayView
+        android:id="@+id/touchOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@android:color/transparent"
+        android:focusable="true"
+        android:focusableInTouchMode="true"
+        android:clickable="true" />
+
+    <!-- All UI (connect screen, toolbar, dialogs, settings): see ClientUi.kt. Touches it does not use fall through to the overlay. -->
+    <androidx.compose.ui.platform.ComposeView
+        android:id="@+id/composeView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+</FrameLayout>

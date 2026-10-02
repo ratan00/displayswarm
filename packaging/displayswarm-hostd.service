@@ -1,0 +1,18 @@
+[Unit]
+Description=DisplaySwarm host daemon (phone as a display and input device)
+Documentation=https://github.com/
+# The tray icon and portals need the graphical session.
+After=graphical-session.target pipewire.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/displayswarm-hostd
+Restart=on-failure
+RestartSec=3
+# Stopping cleanly releases the screencast; give it time.
+TimeoutStopSec=15
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=graphical-session.target

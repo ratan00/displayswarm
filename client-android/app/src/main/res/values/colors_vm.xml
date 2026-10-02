@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The app palette, the same as the Compose scheme in ClientUi.kt. -->
+    <color name="vm_bg">#11111B</color>
+    <color name="vm_surface">#1E1E2E</color>
+    <color name="vm_surface_variant">#313244</color>
+    <color name="vm_text">#CDD6F4</color>
+    <color name="vm_text_muted">#A6ADC8</color>
+    <color name="vm_accent">#B4BEFE</color>
+</resources>

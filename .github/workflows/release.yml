@@ -1,0 +1,62 @@
+name: release
+# Tag vX.Y.Z to build the .deb and the Arch package and attach them to a GitHub release.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  deb:
+    runs-on: ubuntu-latest
+    container: debian:trixie   # ffmpeg 7.x; ffmpeg's soname is baked into the package
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          apt-get update
+          apt-get install -y build-essential curl pkg-config clang libclang-dev dpkg-dev \
+            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libx264-dev \
+            libpipewire-0.3-dev libopus-dev libxcb1-dev libx11-dev libfontconfig-dev \
+            libgbm-dev libxkbcommon-dev libwayland-dev libudev-dev libssl-dev
+          curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+      - run: . "$HOME/.cargo/env" && cd host && cargo build --release --locked
+      - run: packaging/debian/build-deb.sh
+      - uses: actions/upload-artifact@v4
+        with: { name: deb, path: '*.deb' }
+
+  arch:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - run: pacman -Syu --noconfirm git ffmpeg x264 pipewire opus libxcb libx11 fontconfig mesa libxkbcommon wayland cargo clang
+      - uses: actions/checkout@v4
+      - run: |
+          useradd -m builder && chown -R builder .
+          su builder -c 'cd packaging/arch && makepkg -f --nodeps'
+      - uses: actions/upload-artifact@v4
+        with: { name: arch, path: 'packaging/arch/*.pkg.tar.zst' }
+
+  appimage:
+    runs-on: ubuntu-22.04   # oldest glibc we can build on, so the AppImage runs widely
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config clang libclang-dev libfuse2 \
+            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libx264-dev \
+            libpipewire-0.3-dev libopus-dev libxcb1-dev libx11-dev libfontconfig-dev \
+            libgbm-dev libxkbcommon-dev libwayland-dev libudev-dev libssl-dev
+      - run: cd host && cargo build --release --locked
+      - run: packaging/appimage/build-appimage.sh
+      - uses: actions/upload-artifact@v4
+        with: { name: appimage, path: '*.AppImage' }
+
+  release:
+    needs: [deb, arch, appimage]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: out, merge-multiple: true }
+      - uses: softprops/action-gh-release@v2
+        with: { files: out/* }

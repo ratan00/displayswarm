@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=DisplaySwarm
+Comment=Use your phone as a display and input device
+Exec=displayswarm
+Icon=video-display
+Categories=Utility;
+Terminal=false

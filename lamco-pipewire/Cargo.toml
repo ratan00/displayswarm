@@ -1,0 +1,190 @@
+[package]
+# ============================================================================
+# PACKAGE IDENTITY
+# ============================================================================
+name = "lamco-pipewire"
+version = "0.7.0"
+
+# ============================================================================
+# PACKAGE CONFIGURATION (inherited from workspace)
+# ============================================================================
+edition = "2021"
+rust-version = "1.74"
+license = "MIT OR Apache-2.0"
+homepage = "https://lamco.ai/open-source/lamco-wayland/pipewire/"
+repository = "https://github.com/lamco-admin/lamco-wayland"
+
+# ============================================================================
+# CRATE-SPECIFIC METADATA
+# ============================================================================
+description = "High-performance PipeWire screen capture for Wayland with DMA-BUF support, by Lamco Development LLC"
+documentation = "https://docs.rs/lamco-pipewire"
+
+# Keywords for crates.io search (max 5, max 20 chars each)
+keywords = ["pipewire", "wayland", "screen-capture", "dmabuf", "video"]
+
+# Categories for crates.io browsing (max 5)
+# See: https://crates.io/category_slugs
+categories = [
+    "multimedia::video",   # Video capture and processing
+    "os::unix-apis",       # Linux/Unix specific functionality
+    "asynchronous",        # Async/await API design
+    "api-bindings",        # Wrapper around PipeWire C library
+]
+
+# ============================================================================
+# PUBLISHING CONFIGURATION
+# ============================================================================
+
+# Files to exclude from the published crate (reduces download size)
+exclude = [
+    "/.github/",
+    "/tests/",
+    "*.orig",
+    "*.original",
+    "*.bak",
+]
+
+# ============================================================================
+# BADGES (maintenance status)
+# ============================================================================
+[badges]
+maintenance = { status = "actively-developed" }
+
+# ============================================================================
+# DOCS.RS CONFIGURATION
+# ============================================================================
+[package.metadata.docs.rs]
+# Build docs with all features enabled for comprehensive documentation
+all-features = true
+# docs.rs is Linux-only, which matches our target
+targets = ["x86_64-unknown-linux-gnu"]
+# Enable docsrs cfg for conditional documentation
+rustdoc-args = ["--cfg", "docsrs"]
+
+# ============================================================================
+# FEATURES
+# ============================================================================
+[features]
+default = ["dmabuf"]
+# DMA-BUF zero-copy buffer support (requires compatible GPU)
+dmabuf = []
+# YUV format conversion utilities (NV12, I420, YUY2 to BGRA)
+yuv = []
+# Hardware cursor extraction from PipeWire metadata
+cursor = []
+# Region damage tracking for efficient encoding
+damage = []
+# Audio capture via PipeWire
+audio = ["dep:anyhow"]
+# Adaptive bitrate helpers for streaming scenarios
+adaptive = []
+# Enable all optional features
+full = ["dmabuf", "yuv", "cursor", "damage", "adaptive", "audio"]
+
+# ============================================================================
+# LINTS (manual - requires numeric cast overrides for low-level code)
+# PipeWire integration requires extensive numeric conversions for buffer
+# sizes, strides, formats, and coordinates.
+# ============================================================================
+[lints.rust]
+# Unsafe code is expected and extensively used in this low-level PipeWire crate
+# for FFI bindings, buffer management, and mmap operations
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "warn"
+invalid_reference_casting = "warn"
+unused_unsafe = "warn"
+elided_lifetimes_in_paths = "warn"
+single_use_lifetimes = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+# Unsafe code documentation - allow multiple ops per block for closely related operations
+undocumented_unsafe_blocks = "warn"
+multiple_unsafe_ops_per_block = "allow"
+missing_safety_doc = "warn"
+
+# Numeric casts - ALLOWED for low-level PipeWire code
+as_conversions = "allow"
+cast_lossless = "allow"
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+
+# Correctness - unwrap_used allowed because all uses are on mutex locks
+# which only fail when poisoned (thread panicked while holding lock)
+unwrap_used = "allow"
+panic = "warn"
+
+# Style and readability
+similar_names = "warn"
+wildcard_imports = "warn"
+
+# Performance
+large_futures = "warn"
+rc_buffer = "warn"
+or_fun_call = "warn"
+
+# Relaxed lints
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+# PipeWire intentionally uses Arc with non-Send types due to thread architecture
+arc_with_non_send_sync = "allow"
+
+# Functions with many args are acceptable for low-level FFI-style code
+too_many_arguments = "allow"
+
+# Manual div_ceil for compatibility (stdlib version requires Rust 1.73+)
+manual_div_ceil = "allow"
+
+# Allow methods named 'clone' in builder pattern contexts
+should_implement_trait = "allow"
+
+# ============================================================================
+# DEPENDENCIES
+# ============================================================================
+[dependencies]
+# PipeWire bindings
+# pipewire v0_3_33: PropertyFlags::DONT_FIXATE for DmaBuf modifier negotiation.
+# pipewire v0_3_57: unlocks Stream::time()'s pw_stream_get_time_n() path plus
+#                  Time::buffered()/queued_buffers()/avail_buffers(); highest
+#                  pipewire-crate-defined flag at or under this crate's
+#                  documented 0.3.62 floor (no exact v0_3_62 flag exists on
+#                  the `pipewire` crate; that name is libspa's own, below).
+#                  Does not raise the floor: 0.3.62 already exceeds 0.3.57.
+# libspa  v0_3_62: typed MetaVideoTransform wrapper (additive; raises the
+#                  system-library floor to libpipewire 0.3.62, universally present).
+# libspa  v0_3_65: VideoFlags::MODIFIER: compile-time bindgen gate only (no
+#                  further runtime libpipewire/libspa version requirement,
+#                  verified against libspa-sys's build.rs: it's a #define for
+#                  the vendored C shim, not a pkg-config check), so this does
+#                  NOT raise this crate's floor past 0.3.62.
+pipewire = { version = "0.10", features = ["v0_3_33", "v0_3_57"] }
+libspa = { version = "0.10", features = ["v0_3_62", "v0_3_65"] }
+libspa-sys = "0.10"
+
+# Async runtime
+tokio = { version = "1", features = ["sync", "rt", "time"] }
+
+# Futures utilities (for block_on in sync contexts)
+futures = "0.3"
+
+# Logging
+tracing = "0.1"
+
+# Error handling
+thiserror = "2"
+anyhow = { version = "1.0", optional = true }
+
+# Concurrency
+parking_lot = "0.12"
+
+# Low-level operations
+libc = "0.2"
+nix = { version = ">=0.30, <0.32", features = ["mman"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["sync", "rt", "time", "macros", "rt-multi-thread"] }
+tracing-subscriber = "0.3"

@@ -1,0 +1,48 @@
+# DisplaySwarm protocol v2 golden vectors.
+#
+# One message per line, `name: hex bytes`, complete with frame header(s).
+# Checked by BOTH implementations:
+#   host:    host/src/protocol/wire/tests.rs  (encoders_match_golden_vectors)
+#   android: client-android/app/src/test/java/com/displayswarm/client/WireTest.kt
+# Each suite builds the same named messages, encodes them, and must produce
+# exactly these bytes; it must also decode these bytes back to the message.
+#
+# Changing a line here is a wire-format change: update both codecs with it.
+# Regenerate from the Rust side with
+#   cargo test --lib print_golden_vectors -- --ignored --nocapture
+#
+# Frame header: "VM" | version=02 | channel | type | flags | len (u32 BE)
+hello: 56 4d 02 00 01 00 00 00 00 29 06 40 02 d0 00 00 ea 60 01 40 03 00 00 00 07 0a 00 04 61 31 62 32 00 0a 47 61 6c 61 78 79 20 4d 30 36 00 05 32 2e 30 2e 30
+hello_ack: 56 4d 02 00 02 00 00 00 00 17 00 06 40 02 d0 00 3c 01 00 00 00 07 00 00 06 6c 61 70 74 6f 70 00 00
+hello_ack_mismatch: 56 4d 02 00 02 00 00 00 00 32 01 00 00 00 00 00 00 00 00 00 00 00 00 00 06 6c 61 70 74 6f 70 00 1b 55 70 64 61 74 65 20 74 68 65 20 44 69 73 70 6c 61 79 53 77 61 72 6d 20 61 70 70
+ping: 56 4d 02 00 03 00 00 00 00 0c 01 02 03 04 0a 0b 0c 0d 0e 0f 10 11
+pong: 56 4d 02 00 04 00 00 00 00 1c 00 00 00 07 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 02 00 00 00 00 00 00 00 03
+heartbeat: 56 4d 02 00 05 00 00 00 00 00
+bye: 56 4d 02 00 06 00 00 00 00 0a 01 00 07 73 74 6f 70 70 65 64
+stats: 56 4d 02 00 07 00 00 00 00 14 00 00 00 01 00 00 00 02 00 00 00 03 00 00 00 04 00 00 00 05
+host_state: 56 4d 02 00 08 00 00 00 00 05 02 00 02 6f 6b
+keyframe_request: 56 4d 02 00 09 00 00 00 00 00
+set_bitrate: 56 4d 02 00 0a 00 00 00 00 04 00 00 1f 40
+resize: 56 4d 02 00 0b 00 00 00 00 07 06 40 02 d0 01 40 01
+set_role: 56 4d 02 00 0c 00 00 00 00 01 01
+audio_latency: 56 4d 02 00 0e 00 00 00 00 04 00 00 af c8
+audio_sync: 56 4d 02 00 0f 00 00 00 00 04 00 01 d4 c0
+service_state: 56 4d 02 00 10 00 00 00 00 01 03
+video_frame: 56 4d 02 03 20 00 00 00 00 13 01 02 00 00 00 09 00 00 00 00 00 01 e2 40 00 00 00 01 65
+video_fragmented_16: 56 4d 02 03 20 01 00 00 00 10 01 02 00 00 00 09 00 00 00 00 00 01 e2 40 00 01 56 4d 02 03 20 01 00 00 00 10 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f 10 11 56 4d 02 03 20 00 00 00 00 02 12 13
+audio_frame: 56 4d 02 02 30 00 00 00 00 10 00 00 00 03 00 00 00 00 00 00 03 e8 02 01 02 03
+mic_frame: 56 4d 02 02 31 00 00 00 00 0e 00 00 00 04 00 00 00 00 00 00 07 d0 01 09
+touch: 56 4d 02 01 40 00 00 00 00 1d 00 01 02 00 3e 80 00 00 3f 00 00 00 3f 80 00 00 01 3f 40 00 00 3f 00 00 00 3f 00 00 00
+pen: 56 4d 02 01 41 00 00 00 00 34 02 00 01 02 00 00 0f a0 3f 00 00 00 3f 00 00 00 3e 80 00 00 00 00 00 00 00 00 00 00 00 00 00 00 3f 00 00 00 3f 40 00 00 3f 00 00 00 3e 80 00 00 be 80 00 00
+mouse: 56 4d 02 01 42 00 00 00 00 0b 00 01 00 3f 00 00 00 3e 80 00 00
+scroll: 56 4d 02 01 43 00 00 00 00 11 00 3f 00 00 00 3f 00 00 00 00 00 00 00 bf 80 00 00
+pinch: 56 4d 02 01 44 00 00 00 00 11 01 3f 00 00 00 3f 00 00 00 3f 80 00 00 00 00 00 00
+key: 56 4d 02 01 45 00 00 00 00 09 00 00 1d 00 1e 01 00 01 41
+text: 56 4d 02 01 46 00 00 00 00 08 00 06 68 c3 a9 6c 6c 6f
+clipboard: 56 4d 02 04 50 00 00 00 00 0e 00 0a 74 65 78 74 2f 70 6c 61 69 6e 68 69
+file_offer: 56 4d 02 05 60 00 00 00 00 1f 00 00 00 01 00 00 00 00 00 00 04 00 00 05 61 2e 74 78 74 00 0a 74 65 78 74 2f 70 6c 61 69 6e
+file_chunk: 56 4d 02 05 61 00 00 00 00 0e 00 00 00 01 00 00 00 00 00 00 00 00 01 02
+file_control: 56 4d 02 05 62 00 00 00 00 05 00 00 00 01 00
+battery_status: 56 4d 02 00 21 00 00 00 00 05 11 00 03 01 9c
+pair_request: 56 4d 02 00 38 00 00 00 00 17 01 00 04 61 31 62 32 00 0a 47 61 6c 61 78 79 20 4d 30 36 01 02 03 04
+pair_response: 56 4d 02 00 39 00 00 00 00 08 00 00 02 6f 6b 09 08 07

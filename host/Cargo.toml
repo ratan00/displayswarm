@@ -1,0 +1,115 @@
+[package]
+name = "displayswarm-host"
+version = "0.1.0"
+edition = "2021"
+authors = ["DisplaySwarm Team"]
+description = "Cross-platform virtual display host engine for Android"
+
+[lib]
+name = "displayswarm_host"
+path = "src/lib.rs"
+
+# The UI. Talks to the daemon over IPC (or runs it in-process with --standalone).
+[[bin]]
+name = "displayswarm"
+path = "src/main.rs"
+
+# The background daemon: server, USB watcher, sessions, tray.
+[[bin]]
+name = "displayswarm-hostd"
+path = "src/bin/displayswarm-hostd.rs"
+
+[dependencies]
+slint = "1.8"
+tokio = { version = "1", features = ["full"] }
+byteorder = "1.5"
+crossbeam-channel = "0.5"
+log = "0.4"
+env_logger = "0.11"
+# Required by zbus's DeserializeDict derive in capture/portal.rs.
+serde = { version = "1.0", features = ["derive"] }
+# The device store (devices.rs) is a small JSON file; already in the tree via zbus/slint.
+serde_json = "1"
+nusb = { version = "0.2", features = ["tokio"] }
+num_cpus = "1"
+xcap = "0.9.8"
+
+# Hardware/software H.264 encoding through the system ffmpeg (VAAPI/NVENC/QSV/AMF/...),
+# x264, and SIMD RGB->YUV conversion for the CPU paths. Optional (feature `encoders`,
+# on by default) so `cargo check --target x86_64-pc-windows-msvc --no-default-features`
+# works without the native ffmpeg/x264 libraries.
+ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format"], optional = true }
+x264-sys = { version = "0.2", optional = true }
+yuvutils-rs = { version = "0.8", optional = true }
+
+zbus = "5"
+tracing = "0.1"
+tracing-subscriber = "0.3.23"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+mdns-sd = "0.21.4"
+if-addrs = "0.15"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+sha2 = "0.11.0"
+hmac = "0.13.0"
+getrandom = "0.3"
+
+[features]
+default = ["encoders"]
+# H.264 encoder backends (ffmpeg, x264). Turn off only to type-check other
+# platforms where the native libraries are not installed.
+encoders = ["dep:ffmpeg-next", "dep:x264-sys", "dep:yuvutils-rs"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Native Wayland screen capture, using lamco-pipewire.
+lamco-pipewire = { path = "../lamco-pipewire", features = ["audio"] }
+# Audio (Phase 5): the virtual sink talks to PipeWire directly (same version as
+# lamco-pipewire), Opus for the wire format.
+pipewire = { version = "0.10", features = ["v0_3_33", "v0_3_57"] }
+opus = "0.3"
+# Phase 8: clipboard sync (Wayland data-control).
+wl-clipboard-rs = "0.9"
+# Native Linux input injection via uinput/evdev and X11/XShm capture
+libc = "0.2"
+# Tray icon (StatusNotifierItem) in the daemon; async-io keeps it independent of tokio.
+ksni = { version = "0.3", default-features = false, features = ["async-io"] }
+futures-util = "0.3"
+evdev = "0.12"
+# X11 sessions (M5): the RandR layout, its change events and the spare-output
+# probe. Pure Rust connection; already in the tree through slint/winit.
+x11rb = { version = "0.13", features = ["randr"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_Display",
+    "Win32_System_Registry",
+    "Win32_System_Pipes",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Input_Pointer",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Wdk_System_SystemServices",
+    "Win32_System_RemoteDesktop",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Foundation",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+] }
+
+[build-dependencies]
+slint-build = "1.8"

@@ -1,0 +1,619 @@
+import { Button, CheckBox, ComboBox, LineEdit, Slider, Switch, TextEdit, ScrollView } from "std-widgets.slint";
+
+// One device card. Everything is preformatted by the UI process; the toggles
+// are the DeviceSettings fields the host implements.
+export struct DeviceRow {
+    id: string,
+    name: string,
+    // Index into `role-names`, or -1 while no role has been chosen.
+    role-index: int,
+    state: string,
+    connected: bool,
+    needs-role: bool,
+    // "USB", "Network" or "".
+    transport: string,
+    // "2400x1080@120Hz" or "".
+    resolution: string,
+    fps-text: string,
+    latency-text: string,
+    bitrate-text: string,
+    // SVG path data for the sparklines (viewbox 120 x 28), empty without data.
+    latency-path: string,
+    bitrate-path: string,
+    audio-out: bool,
+    // 0 Auto, 1 Maximum, 2 Balanced, 3 Data saver.
+    quality-index: int,
+    audio-mode: int,
+    delay-host: bool,
+    mic: bool,
+    clipboard: bool,
+    battery-saver: bool,
+    panel-off: bool,
+    // Only PhonePrimary has a panel to turn off.
+    show-panel-off: bool,
+    // Mirror / Tablet: the host monitor (connector name), "" = ask.
+    target-output: string,
+    show-target: bool,
+    flashing: bool,
+}
+
+export struct DiagRow {
+    name: string,
+    // 0 ok, 1 warning, 2 failure
+    status: int,
+    detail: string,
+}
+
+// A stateless switch: it shows `checked` and reports the wish to flip it, so
+// the value always comes from the host and no binding is ever overwritten.
+component Toggle inherits HorizontalLayout {
+    in property <string> label;
+    in property <bool> checked;
+    in property <bool> enabled: true;
+    callback toggled(bool);
+    spacing: 6px;
+    Rectangle {
+        width: 34px;
+        height: 18px;
+        y: 1px;
+        border-radius: 9px;
+        background: root.checked ? #89b4fa : #45475a;
+        opacity: root.enabled ? 1.0 : 0.5;
+        Rectangle {
+            width: 14px;
+            height: 14px;
+            y: 2px;
+            x: root.checked ? 18px : 2px;
+            border-radius: 7px;
+            background: #cdd6f4;
+            animate x { duration: 100ms; }
+        }
+        TouchArea {
+            enabled: root.enabled;
+            clicked => { root.toggled(!root.checked); }
+        }
+    }
+    Text { text: root.label; color: #a6adc8; vertical-alignment: center; font-size: 12px; }
+}
+
+component Sparkline inherits VerticalLayout {
+    in property <string> caption;
+    in property <string> value;
+    in property <string> path;
+    in property <color> line: #89b4fa;
+    spacing: 2px;
+    HorizontalLayout {
+        spacing: 6px;
+        Text { text: root.caption; color: #7f849c; font-size: 11px; }
+        Text { text: root.value; color: #cdd6f4; font-size: 11px; font-weight: 600; }
+    }
+    Rectangle {
+        height: 28px;
+        width: 120px;
+        background: #181825;
+        border-radius: 3px;
+        Path {
+            width: 100%;
+            height: 100%;
+            viewbox-width: 120;
+            viewbox-height: 28;
+            commands: root.path;
+            stroke: root.line;
+            stroke-width: 1.5px;
+        }
+    }
+}
+
+component DeviceCard inherits Rectangle {
+    in property <DeviceRow> dev;
+    in property <[string]> role-names;
+    callback set-role(int);
+    callback toggle-setting(int, bool);
+    callback set-quality(int);
+    callback set-audio-mode(int);
+    callback set-target(string);
+    callback disconnect();
+    callback forget();
+    callback identify();
+
+    background: #1e1e2e;
+    border-radius: 8px;
+    border-width: 2px;
+    border-color: root.dev.flashing ? #f9e2af : root.dev.needs-role ? #fab387 : #313244;
+    height: content.height + 32px;
+
+    content := VerticalLayout {
+        x: 12px;
+        y: 12px;
+        width: parent.width - 24px;
+        // The layout's own minimum can exceed its preferred height (buttons, combo boxes),
+        // which pushed the last row out of the card.
+        height: max(self.preferred-height, self.min-height);
+        spacing: 8px;
+
+        HorizontalLayout {
+            spacing: 8px;
+            Rectangle {
+                width: 10px;
+                height: 10px;
+                y: 6px;
+                border-radius: 5px;
+                background: root.dev.connected ? #a6e3a1 : #585b70;
+            }
+            Text {
+                text: root.dev.name;
+                color: #cdd6f4;
+                font-size: 15px;
+                font-weight: 700;
+                horizontal-stretch: 1;
+                overflow: elide;
+            }
+            Text {
+                text: root.dev.transport;
+                color: #94e2d5;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+            Text {
+                text: root.dev.resolution;
+                color: #a6adc8;
+                font-size: 11px;
+                vertical-alignment: center;
+            }
+        }
+
+        Text {
+            text: root.dev.state;
+            color: root.dev.needs-role ? #fab387 : #a6adc8;
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: "Role"; color: #7f849c; vertical-alignment: center; font-size: 12px; }
+            ComboBox {
+                model: root.role-names;
+                current-index: max(root.dev.role-index, 0);
+                selected(_) => { root.set-role(self.current-index); }
+            }
+            if root.dev.needs-role: Text {
+                text: "\u{2190} choose one";
+                color: #fab387;
+                vertical-alignment: center;
+                font-size: 12px;
+            }
+            if root.dev.show-target: LineEdit {
+                placeholder-text: "Monitor (e.g. eDP-1), empty = ask";
+                text: root.dev.target-output;
+                accepted(t) => { root.set-target(t); }
+            }
+        }
+
+        if root.dev.connected && root.dev.fps-text != "": HorizontalLayout {
+            spacing: 16px;
+            Sparkline {
+                caption: "Latency";
+                value: root.dev.latency-text;
+                path: root.dev.latency-path;
+                line: #f38ba8;
+            }
+            Sparkline {
+                caption: "Bitrate";
+                value: root.dev.bitrate-text;
+                path: root.dev.bitrate-path;
+                line: #89b4fa;
+            }
+            Text {
+                text: root.dev.fps-text;
+                color: #cdd6f4;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            Text { text: "Picture quality"; color: #7f849c; vertical-alignment: center; font-size: 12px; }
+            ComboBox {
+                model: ["Auto (adaptive bitrate)", "Maximum (best quality)", "Balanced (in between)", "Data saver (low quality)"];
+                current-index: root.dev.quality-index;
+                selected(_) => { root.set-quality(self.current-index); }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 14px;
+            alignment: start;
+            Toggle { label: "Audio"; checked: root.dev.audio-out; toggled(v) => { root.toggle-setting(0, v); } }
+            Toggle { label: "Mic"; checked: root.dev.mic; toggled(v) => { root.toggle-setting(1, v); } }
+            Toggle { label: "Clipboard"; checked: root.dev.clipboard; toggled(v) => { root.toggle-setting(2, v); } }
+            Toggle { label: "Battery saver"; checked: root.dev.battery-saver; toggled(v) => { root.toggle-setting(3, v); } }
+        }
+        if root.dev.audio-out: HorizontalLayout {
+            spacing: 8px;
+            Text { text: "Audio mode"; color: #7f849c; vertical-alignment: center; font-size: 12px; }
+            ComboBox {
+                model: ["Separate output (pick it in sound settings)", "Play along with the laptop speakers", "Replace the laptop speakers"];
+                current-index: root.dev.audio-mode;
+                selected(_) => { root.set-audio-mode(self.current-index); }
+            }
+        }
+        if root.dev.audio-out && root.dev.audio-mode == 1: Toggle {
+            label: "Delay the laptop speakers so both sound together";
+            checked: root.dev.delay-host;
+            toggled(v) => { root.toggle-setting(8, v); }
+        }
+        if root.dev.show-panel-off: Toggle {
+            label: "Turn the laptop panel off while the phone is the main screen";
+            checked: root.dev.panel-off;
+            toggled(v) => { root.toggle-setting(4, v); }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: end;
+            Button { text: "Identify"; clicked => { root.identify(); } }
+            Button { text: "Disconnect"; enabled: root.dev.connected; clicked => { root.disconnect(); } }
+            Button { text: "Forget"; clicked => { root.forget(); } }
+        }
+    }
+}
+
+component TabButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked();
+    height: 34px;
+    border-radius: 6px;
+    background: root.active ? #313244 : touch.has-hover ? #2a2a3c : transparent;
+    Text {
+        text: root.label;
+        color: root.active ? #cdd6f4 : #a6adc8;
+        font-weight: root.active ? 700 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
+
+component Section inherits Rectangle {
+    in property <string> title;
+    background: #1e1e2e;
+    border-radius: 8px;
+    height: box.height + 32px;
+    box := VerticalLayout {
+        x: 14px;
+        y: 12px;
+        width: parent.width - 28px;
+        // Minimum sizes of buttons and fields can exceed the preferred height; use the larger
+        // so the last row stays inside the box.
+        height: max(self.preferred-height, self.min-height);
+        spacing: 8px;
+        Text { text: root.title; color: #89b4fa; font-size: 14px; font-weight: 600; }
+        @children
+    }
+}
+
+component Row inherits HorizontalLayout {
+    in property <string> label;
+    spacing: 12px;
+    Text { text: root.label; color: #a6adc8; vertical-alignment: center; width: 150px; font-size: 12px; }
+    @children
+}
+
+export component MainWindow inherits Window {
+    title: "DisplaySwarm";
+    preferred-width: 760px;
+    preferred-height: 800px;
+    min-width: 560px;
+    background: #181825;
+    default-font-family: "sans-serif";
+
+    // -- connection to the daemon
+    in-out property <bool> daemon-connected: false;
+    in-out property <string> banner: "Connecting to the DisplaySwarm daemon\u{2026}";
+
+    // -- server
+    in-out property <bool> server-running: false;
+    in-out property <string> server-status: "";
+    in-out property <string> client-info: "";
+
+    // -- devices
+    in-out property <[DeviceRow]> devices: [];
+    in-out property <[string]> role-names: [];
+    in-out property <string> pending-device-name: "";
+
+    // -- global settings
+    in-out property <string> port-text: "9999";
+    in-out property <int> fps: 60;
+    in-out property <int> bitrate-mbps: 20;
+    // 0 = ask every time, otherwise 1 + index into role-names
+    in-out property <int> default-role-index: 0;
+    in-out property <bool> audio-sync: false;
+    in-out property <bool> start-on-login: false;
+    in-out property <string> encoder-text: "probing\u{2026}";
+    in-out property <string> transports-text: "";
+    in-out property <string> backend-text: "";
+    in-out property <string> tray-text: "";
+    in-out property <string> settings-status: "";
+
+    // -- Wi-Fi (filled by the wireless work through the "wifi" IPC command)
+    in-out property <string> wifi-status: "";
+    in-out property <string> wifi-detail: "";
+    // Name of an active firewall (ufw/firewalld) that may block phones; "" if none.
+    in-out property <string> wifi-firewall: "";
+
+    // -- diagnostics
+    in-out property <[DiagRow]> diagnostics: [];
+    in-out property <string> log-text: "";
+    in-out property <string> report-status: "";
+    in-out property <string> display-status-text: "";
+
+    in-out property <int> tab: 0;
+
+    callback set-device-role(string, int);
+    callback toggle-setting(string, int, bool);
+    callback set-audio-mode(string, int);
+    callback set-target-output(string, string);
+    callback disconnect-device(string);
+    callback forget-device(string);
+    callback identify-device(string);
+    callback toggle-server();
+    callback apply-settings();
+    callback sync-audio-now();
+    callback set-start-on-login(bool);
+    callback refresh-diagnostics();
+    callback refresh-logs();
+    callback copy-report();
+    callback setup-display();
+    callback refresh-wifi();
+    callback start-pairing();
+    callback set-video-quality(string, int);
+    callback open-firewall();
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 10px;
+
+        // Header
+        HorizontalLayout {
+            spacing: 12px;
+            Text {
+                text: "DisplaySwarm";
+                font-size: 20px;
+                font-weight: 700;
+                color: #cdd6f4;
+                vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Text {
+                text: root.server-status;
+                color: #a6adc8;
+                font-size: 12px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            Button {
+                text: root.server-running ? "Stop server" : "Start server";
+                enabled: root.daemon-connected;
+                clicked => { root.toggle-server(); }
+            }
+        }
+
+        if !root.daemon-connected || root.banner != "": Rectangle {
+            height: 30px;
+            border-radius: 6px;
+            background: #45475a;
+            Text {
+                text: root.banner;
+                color: #f9e2af;
+                font-size: 12px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        if root.pending-device-name != "": Rectangle {
+            height: 34px;
+            border-radius: 6px;
+            background: #fab387;
+            Text {
+                text: root.pending-device-name + " connected \u{2013} choose what to use it for below.";
+                color: #11111b;
+                font-weight: 600;
+                font-size: 12px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 6px;
+            TabButton { label: "Devices"; active: root.tab == 0; clicked => { root.tab = 0; } }
+            TabButton { label: "Settings"; active: root.tab == 1; clicked => { root.tab = 1; } }
+            TabButton {
+                label: "Diagnostics";
+                active: root.tab == 2;
+                clicked => { root.tab = 2; root.refresh-diagnostics(); root.refresh-logs(); }
+            }
+        }
+
+        // ---- Devices
+        if root.tab == 0: ScrollView {
+            VerticalLayout {
+                spacing: 10px;
+                padding-right: 6px;
+                if root.devices.length == 0: Rectangle {
+                    height: 120px;
+                    Text {
+                        text: "No devices yet.\nPlug the phone in by USB and open the DisplaySwarm app.";
+                        color: #7f849c;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                for dev in root.devices: DeviceCard {
+                    dev: dev;
+                    role-names: root.role-names;
+                    set-role(idx) => { root.set-device-role(dev.id, idx); }
+                    toggle-setting(kind, v) => { root.toggle-setting(dev.id, kind, v); }
+                    set-quality(q) => { root.set-video-quality(dev.id, q); }
+                    set-audio-mode(m) => { root.set-audio-mode(dev.id, m); }
+                    set-target(t) => { root.set-target-output(dev.id, t); }
+                    disconnect => { root.disconnect-device(dev.id); }
+                    forget => { root.forget-device(dev.id); }
+                    identify => { root.identify-device(dev.id); }
+                }
+            }
+        }
+
+        // ---- Settings
+        if root.tab == 1: ScrollView {
+            VerticalLayout {
+                spacing: 10px;
+                padding-right: 6px;
+
+                Section {
+                    title: "Streaming";
+                    Row {
+                        label: "Encoder";
+                        Text { text: root.encoder-text; color: #cdd6f4; vertical-alignment: center; font-size: 12px; }
+                    }
+                    Row {
+                        label: "Transports";
+                        Text { text: root.transports-text; color: #cdd6f4; vertical-alignment: center; font-size: 12px; wrap: word-wrap; }
+                    }
+                    Row {
+                        label: "Listen port";
+                        LineEdit { text <=> root.port-text; }
+                    }
+                    Row {
+                        label: "Target FPS (" + root.fps + ")";
+                        Slider {
+                            minimum: 30;
+                            maximum: 120;
+                            value: root.fps;
+                            changed(v) => { root.fps = Math.round(v); }
+                        }
+                    }
+                    Row {
+                        label: "Bitrate (" + root.bitrate-mbps + " Mbps)";
+                        Slider {
+                            minimum: 5;
+                            maximum: 50;
+                            value: root.bitrate-mbps;
+                            changed(v) => { root.bitrate-mbps = Math.round(v); }
+                        }
+                    }
+                    Row {
+                        label: "Default role";
+                        ComboBox {
+                            model: root.role-names;
+                            current-index: max(root.default-role-index - 1, 0);
+                            selected(_) => { root.default-role-index = self.current-index + 1; }
+                        }
+                        Button { text: "Ask each time"; clicked => { root.default-role-index = 0; } }
+                        Text {
+                            text: root.default-role-index == 0 ? "asks" : "applied to new devices";
+                            color: #7f849c;
+                            vertical-alignment: center;
+                            font-size: 11px;
+                        }
+                    }
+                    Toggle {
+                        label: "Keep all phones' audio in sync (delays the fastest to match the farthest)";
+                        checked: root.audio-sync;
+                        toggled(v) => { root.audio-sync = v; }
+                    }
+                    HorizontalLayout {
+                        spacing: 10px;
+                        Button { text: "Apply"; enabled: root.daemon-connected; clicked => { root.apply-settings(); } }
+                        Button { text: "Sync audio now"; enabled: root.daemon-connected; clicked => { root.sync-audio-now(); } }
+                        Text { text: root.settings-status; color: #a6adc8; vertical-alignment: center; font-size: 12px; }
+                    }
+                }
+
+                Section {
+                    title: "General";
+                    Toggle {
+                        label: "Start DisplaySwarm when I log in";
+                        checked: root.start-on-login;
+                        toggled(v) => { root.set-start-on-login(v); }
+                    }
+                    Row {
+                        label: "Tray";
+                        Text { text: root.tray-text; color: #cdd6f4; vertical-alignment: center; font-size: 12px; wrap: word-wrap; }
+                    }
+                }
+
+                Section {
+                    title: "Wi-Fi";
+                    Text { text: root.wifi-status; color: #cdd6f4; font-size: 12px; }
+                    Text { text: root.wifi-detail; color: #7f849c; font-size: 12px; wrap: word-wrap; }
+                    // Pairing (QR / PIN) and trusted devices go here; see daemon/wifi.rs.
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Button { text: "Pair a phone (PIN)"; clicked => { root.start-pairing(); } }
+                        Button {
+                            visible: root.wifi-firewall != "";
+                            text: "Open firewall port (" + root.wifi-firewall + ")";
+                            clicked => { root.open-firewall(); }
+                        }
+                        Button { text: "Refresh"; clicked => { root.refresh-wifi(); } }
+                    }
+                }
+            }
+        }
+
+        // ---- Diagnostics
+        if root.tab == 2: ScrollView {
+            VerticalLayout {
+                spacing: 10px;
+                padding-right: 6px;
+
+                Section {
+                    title: "Checks";
+                    Row {
+                        label: "Desktop backend";
+                        Text { text: root.backend-text; color: #cdd6f4; vertical-alignment: center; font-size: 12px; }
+                    }
+                    for d in root.diagnostics: HorizontalLayout {
+                        spacing: 8px;
+                        Rectangle {
+                            width: 10px;
+                            height: 10px;
+                            y: 4px;
+                            border-radius: 5px;
+                            background: d.status == 0 ? #a6e3a1 : d.status == 1 ? #f9e2af : #f38ba8;
+                        }
+                        Text { text: d.name; color: #cdd6f4; font-size: 12px; width: 190px; }
+                        Text { text: d.detail; color: #a6adc8; font-size: 12px; wrap: word-wrap; horizontal-stretch: 1; }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Button { text: "Re-run checks"; clicked => { root.refresh-diagnostics(); } }
+                        Button { text: "Set up virtual display"; clicked => { root.setup-display(); } }
+                    }
+                    Text { text: root.display-status-text; color: #7f849c; font-size: 11px; wrap: word-wrap; }
+                }
+
+                Section {
+                    title: "Log";
+                    TextEdit {
+                        text: root.log-text;
+                        read-only: true;
+                        height: 260px;
+                        font-size: 11px;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        Button { text: "Refresh log"; clicked => { root.refresh-logs(); } }
+                        Button { text: "Copy debug report"; clicked => { root.copy-report(); } }
+                        Text { text: root.report-status; color: #a6adc8; vertical-alignment: center; font-size: 12px; wrap: word-wrap; }
+                    }
+                }
+            }
+        }
+    }
+}
