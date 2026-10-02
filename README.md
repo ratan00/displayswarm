@@ -1,6 +1,6 @@
 # DisplaySwarm
 
-Use an Android phone or tablet as a second monitor for your Linux PC, over USB or Wi-Fi. Several devices can be connected at once.
+Use your Android phone or tablet as a second monitor/speaker for your Linux PC, over USB or Wi-Fi. Several devices can be connected at once.
 
 ## Features
 
@@ -16,11 +16,11 @@ Use an Android phone or tablet as a second monitor for your Linux PC, over USB o
 
 - KDE Plasma 6 (Wayland)
 - GNOME (Wayland). Don't use the display-switch key (F4) while streaming; it can crash gnome-shell (a mutter bug). Change roles in the app instead.
-- X11 desktops (Cinnamon, XFCE, MATE, ...)
+- X11 desktops (Cinnamon, XFCE, MATE, ...)(not 100%)
 
 ## Limited support
 
-- COSMIC: partial
+- COSMIC: partial(mirror only)
 - Windows host: written, never tested
 - Sway, Hyprland and other wlroots compositors: not supported yet
 
