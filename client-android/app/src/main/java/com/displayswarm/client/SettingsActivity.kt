@@ -110,6 +110,37 @@ class SettingsActivity : AppCompatActivity() {
         column.addView(themedButton("Reset macro buttons") { state.macros = Macro.DEFAULTS; s.macros = Macro.DEFAULTS }.apply {
             (layoutParams as? LinearLayout.LayoutParams)?.topMargin = dp(16)
         })
+
+        column.section("About")
+        val current = try { packageManager.getPackageInfo(packageName, 0).versionName ?: "?" } catch (e: Exception) { "?" }
+        val updateStatus = text("Version $current", 14f, muted)
+        column.addView(updateStatus)
+        var releasePage = UpdateChecker.RELEASES_PAGE
+        val updateButton = themedButton("Check for updates") {}
+        fun checkForUpdates() {
+            updateStatus.text = "Version $current, checking for updates\u2026"
+            Thread {
+                val latest = UpdateChecker.fetchLatest()
+                runOnUiThread {
+                    updateStatus.text = when {
+                        latest == null -> "Version $current. Could not check for updates."
+                        UpdateChecker.isNewer(current, latest.tag) -> "Version $current. Update available: ${latest.tag}"
+                        else -> "Version $current. You are up to date."
+                    }
+                    if (latest != null && UpdateChecker.isNewer(current, latest.tag)) {
+                        releasePage = latest.url
+                        updateButton.text = "Download ${latest.tag}"
+                    }
+                }
+            }.start()
+        }
+        updateButton.setOnClickListener {
+            if (updateButton.text.startsWith("Download")) {
+                startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(releasePage)))
+            } else checkForUpdates()
+        }
+        column.addView(updateButton)
+        checkForUpdates()
     }
 
     /** A button in the app palette: surface-variant fill, light text. */

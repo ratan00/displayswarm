@@ -1,5 +1,5 @@
 name: release
-# Tag vX.Y.Z to build the .deb and the Arch package and attach them to a GitHub release.
+# Tag vX.Y.Z to build the .deb, the Arch package, the AppImage and the Android APK and attach them to a GitHub release.
 on:
   push:
     tags: ['v*']
@@ -50,8 +50,19 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: appimage, path: '*.AppImage' }
 
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - run: cd client-android && ./gradlew assembleDebug
+      - run: cp client-android/app/build/outputs/apk/debug/app-debug.apk DisplaySwarm-${GITHUB_REF_NAME#v}.apk
+      - uses: actions/upload-artifact@v4
+        with: { name: apk, path: '*.apk' }
+
   release:
-    needs: [deb, arch, appimage]
+    needs: [deb, arch, appimage, apk]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions: { contents: write }

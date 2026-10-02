@@ -1,121 +1,71 @@
-# DisplaySwarm: Virtual Secondary Display & Digitizer
+# DisplaySwarm
 
-Turn your Android device into a high-performance second monitor with ultra-low latency, 60/120 Hz refresh rates, and active stylus/pressure sensitivity (similar to SuperDisplay). Supports **Windows & Linux** hosts and **Android** clients.
+Use an Android phone or tablet as a second monitor for your Linux PC, over USB or Wi-Fi. Several devices can be connected at once.
 
+## Features
 
----
+- Low-latency H.264 video (hardware encoding via VAAPI)
+- USB (Android Open Accessory, no ADB needed) or Wi-Fi with TLS and PIN pairing
+- Touch, multi-touch gestures and pressure/tilt stylus input
+- Extend, mirror, or use the phone as your main screen
+- Laptop audio on the phone, phone microphone to the laptop, synced across devices
+- Clipboard sharing and file transfer
+- Phone battery on the host, per-device settings
 
-## Architecture Overview
+## Works fine on
 
-```
-DisplaySwarm/
-├── host/                    # Host Engine in Rust with Slint GUI
-│   ├── Cargo.toml
-│   ├── build.rs             # Slint UI compiler
-│   ├── src/
-│   │   ├── main.rs          # GUI and Tokio async runtime coordinator
-│   │   ├── protocol/        # Protocol v2 (wire.rs) and the injector event model
-│   │   ├── server.rs        # Video/input streaming loop
-│   │   ├── transport/       # USB AOA (Android Open Accessory) & TCP transports
-│   │   ├── capture/         # Screen capture (Wayland portal + PipeWire, X11, Windows DXGI)
-│   │   ├── display/         # Virtual display provisioning (Linux vkms)
-│   │   ├── encoder/         # H.264 video encoder (x264)
-│   │   ├── input/           # Input injection (Linux /dev/uinput & Windows SyntheticPointer) and router.rs (protocol input -> injector events)
-│   │   └── bin/aoa_probe.rs # USB AOA diagnostic tool
-│   ├── tests/gnome_probe.rs # GNOME portal handshake probe
-│   └── ui/
-│       └── appwindow.slint  # Native UI (framerate, bitrate, status, port)
-├── lamco-pipewire/          # Vendored PipeWire capture crate (patched)
-├── client-android/          # Android Client Application
-│   └── app/src/main/
-│       ├── AndroidManifest.xml
-│       ├── java/com/displayswarm/client/
-│       │   ├── MainActivity.kt   # Fullscreen immersive activity & HUD
-│       │   ├── AoaManager.kt     # USB accessory (AOA) connection
-│       │   ├── Wire.kt           # Protocol v2 codec matching the host
-│       │   ├── Protocol.kt       # Protocol constants
-│       │   ├── VideoDecoder.kt   # Low-latency MediaCodec -> SurfaceView
-│       │   ├── InputManager.kt   # Stylus pressure, tilt & touch capture
-│       │   └── NetworkClient.kt  # Socket client & metrics tracking
-│       └── res/
-├── protocol/
-│   └── v2-vectors.txt       # Golden protocol v2 bytes checked by both test suites
-└── scripts/
-    ├── test_protocol.py     # Standalone verification host
-    ├── test_client.py       # Standalone verification client
-    └── test_uinput.py       # Checks /dev/uinput permissions
-```
+- KDE Plasma 6 (Wayland)
+- GNOME (Wayland). Don't use the display-switch key (F4) while streaming; it can crash gnome-shell (a mutter bug). Change roles in the app instead.
+- X11 desktops (Cinnamon, XFCE, MATE, ...)
 
----
+## Limited support
 
-## Protocol
+- COSMIC: partial
+- Windows host: written, never tested
+- Sway, Hyprland and other wlroots compositors: not supported yet
 
-Phone and host speak **protocol v2** over USB (AOA) or TCP. Every byte in both directions is a frame: a 10-byte header `"VM"` | version | channel | type | flags | length (big endian), then the payload. Messages live on six channels (control, input, audio, video, clipboard, file) and large messages are split into fragments, so input and control are never stuck behind a video keyframe. The framing, the message list and the version-mismatch behaviour (an app and host of different versions show each other a clear error) are defined in `host/src/protocol/wire.rs`; `protocol/v2-vectors.txt` holds the golden bytes both codecs are tested against. The old `scripts/test_*.py` helpers speak the retired v1 format.
+Tested so far on one machine, so other GPUs and drivers may need fixes.
 
----
+## Install
 
-## Quick Start
+Download the latest packages and the Android app from the **[Releases page](https://github.com/ratan00/displayswarm/releases)**:
 
-### 1. Building & Running the Host (Rust + Slint)
+| Platform | File |
+|---|---|
+| Arch / CachyOS / Manjaro | `displayswarm-*.pkg.tar.zst` (`sudo pacman -U file`) |
+| Debian / Ubuntu | `displayswarm_*_amd64.deb` (`sudo apt install ./file`) |
+| Any Linux | `DisplaySwarm-*.AppImage` (`chmod +x` and run) |
+| Android 8+ | `DisplaySwarm-*.apk` |
 
-Ensure Rust is installed (`rustup default stable` or `sudo pacman -S rust cargo`).
+The Android app checks the Releases page when you open its Settings and tells you when a newer version is out. It opens the download page; it never installs anything by itself.
+
+Then start DisplaySwarm on the PC, open the app on the phone and connect by USB cable or pick the PC in the list over Wi-Fi. On Wi-Fi a firewall may block the phone; the host has an "Open firewall port" button for ufw/firewalld.
+
+## Screenshots
+
+Coming soon. If you have a good one, please send a pull request to add it under `docs/screenshots/`.
+
+## Build from source
 
 ```bash
-cd host
-cargo run --release
+# Host (Rust, Slint UI). Needs ffmpeg, x264, pipewire, opus dev libraries and clang.
+cd host && cargo build --release          # binaries: displayswarm, displayswarm-hostd
+
+# Android app (JDK 17, Android SDK)
+cd client-android && ./gradlew assembleDebug
+
+# Packages
+cd packaging/arch && makepkg -f           # Arch package
+packaging/debian/build-deb.sh             # .deb
+packaging/appimage/build-appimage.sh      # AppImage
 ```
 
-The Slint UI will launch:
-* Choose your target FPS (30 - 120 FPS) and Bitrate (5 - 50 Mbps).
-* Click **Start Server** (defaults to port `9999`).
+Tests: `cargo test` in `host/`, `./gradlew testDebugUnitTest` in `client-android/`. Tagging `vX.Y.Z` builds and publishes every package through GitHub Actions.
 
-### 2. Running the Android Client
+## Help spread the word
 
-Open `client-android` in Android Studio or build with Gradle:
+If DisplaySwarm is useful to you, please star the repo and tell others. More fixes and desktop support are coming. Bug reports and pull requests are welcome.
 
-```bash
-cd client-android
-./gradlew assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-```
+## License
 
-### 3. Connecting via USB (AOA)
-
-1. Connect your Android device via USB.
-2. The host switches the phone into Android Open Accessory mode and the DisplaySwarm app opens automatically. Accept the USB accessory prompt on the phone.
-3. On Wayland, accept the screen-share dialog on the desktop.
-
-If the phone is not detected, run `cargo run --release --bin aoa_probe` in `host/` to diagnose.
-
-### 4. Connecting via TCP (ADB Reverse)
-
-As an alternative to AOA:
-1. Enable USB Debugging on the Android device.
-2. Reverse the port so the Android device can reach your host via `127.0.0.1:9999`:
-   ```bash
-   adb reverse tcp:9999 tcp:9999
-   ```
-3. Open **DisplaySwarm** on your Android device and tap **Connect**.
-
-### Environment variables (Linux host)
-
-| Variable | Purpose |
-|----------|---------|
-| `DISPLAYSWARM_BIND` | TCP bind address (default `127.0.0.1:9999`) |
-| `DISPLAYSWARM_CAPTURE` | Capture backend: `auto` (default), `native`, `pipewire`, `x11`, `mock` |
-| `DISPLAYSWARM_CAPTURE_OUTPUT` | Capture a specific output/monitor |
-| `DISPLAYSWARM_RESET_RESTORE_TOKEN` | Discard the saved screen-share permission |
-| `DISPLAYSWARM_RESTORE_TOKEN_PATH` | Custom location for the saved permission token |
-
----
-
-## Stylus & Digitizer Support
-
-The Android client captures:
-* **Tool Type**: Automatic discrimination between finger touch, S-Pen/stylus tip, and eraser.
-* **Pressure**: Full normalized float (0.0 to 1.0) mapped to 4096 levels on the host.
-* **Tilt**: Stylus X and Y tilt angles for realistic brush/drawing behaviors.
-* **Buttons**: Barrel buttons (primary & secondary).
-
-On Linux, inputs are dispatched via `/dev/uinput` (creates a virtual tablet).  
-On Windows, inputs are dispatched via Windows Synthetic Pointer API (`InjectSyntheticPointerInput`).
+GPL-3.0. Third-party notices are in [NOTICE](NOTICE).
