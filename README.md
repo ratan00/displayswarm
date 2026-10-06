@@ -43,7 +43,13 @@ Then start DisplaySwarm on the PC, open the app on the phone and connect by USB 
 
 ## Screenshots
 
-Coming soon. If you have a good one, please send a pull request to add it under `docs/screenshots/`.
+The host window on the PC, with a tablet connected over USB and extending the desktop:
+
+![DisplaySwarm host window on KDE Plasma](docs/screenshots/host.png)
+
+The Android app, choosing what the device does (mirror, extend, mirror one window, drawing tablet, input pad):
+
+![DisplaySwarm Android app, change role dialog](docs/screenshots/phone.jpg)
 
 ## Build from source
 
