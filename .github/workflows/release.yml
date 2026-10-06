@@ -45,18 +45,19 @@ jobs:
           # readable by the builder, so the builder needs its own rustup.
           useradd -m builder && chown -R builder .
           # `su - builder` (with the dash) gives a login shell, so HOME and
-          # PATH come from the builder's own profile and find cargo.
-          su - builder -c "curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain $RUST_TOOLCHAIN && cd packaging/arch && makepkg -f --nodeps"
+          # PATH come from the builder's own profile and find cargo. It also starts in
+          # the builder's home, so cd to the checkout by absolute path ($PWD expands here).
+          su - builder -c "curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain $RUST_TOOLCHAIN && cd $PWD/packaging/arch && makepkg -f --nodeps"
       - uses: actions/upload-artifact@v4
         with: { name: arch, path: 'packaging/arch/*.pkg.tar.zst' }
 
   appimage:
-    runs-on: ubuntu-22.04   # oldest glibc we can build on, so the AppImage runs widely
+    runs-on: ubuntu-24.04   # 22.04's pipewire (0.3.48) is too old for libspa-sys
     steps:
       - uses: actions/checkout@v4
       - run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config clang libclang-dev libfuse2 \
+          sudo apt-get install -y build-essential pkg-config clang libclang-dev libfuse2t64 \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libx264-dev \
             libpipewire-0.3-dev libopus-dev libxcb1-dev libx11-dev libfontconfig-dev \
             libgbm-dev libxkbcommon-dev libwayland-dev libudev-dev libssl-dev \
