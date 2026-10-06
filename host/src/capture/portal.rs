@@ -494,18 +494,17 @@ fn ensure_desktop_file(app_id: &str) -> std::io::Result<()> {
         .ok_or_else(|| std::io::Error::other("no XDG_DATA_HOME or HOME"))?;
     let dir = base.join("applications");
     let path = dir.join(format!("{app_id}.desktop"));
-    if path.exists() {
+    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "displayswarm-hostd".into());
+    let contents = format!(
+        "[Desktop Entry]\nType=Application\nName=DisplaySwarm\nComment=Phone display for this PC\n\
+         Exec={exe}\nIcon=video-display\nNoDisplay=true\nTerminal=false\n"
+    );
+    // Rewritten when the binary moved (AppImage mount, rebuilt target dir), so the entry never points at a dead path.
+    if std::fs::read_to_string(&path).is_ok_and(|old| old == contents) {
         return Ok(());
     }
     std::fs::create_dir_all(&dir)?;
-    let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "displayswarm-hostd".into());
-    std::fs::write(
-        &path,
-        format!(
-            "[Desktop Entry]\nType=Application\nName=DisplaySwarm\nComment=Phone display for this PC\n\
-             Exec={exe}\nIcon=video-display\nNoDisplay=true\nTerminal=false\n"
-        ),
-    )
+    std::fs::write(&path, contents)
 }
 
 /// Whether a grant of `granted` fails a request for `requested` (a type

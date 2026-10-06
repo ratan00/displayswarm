@@ -326,6 +326,9 @@ pub fn start_screencast_request(
             // also drives it never ticks and no frame arrives. Everywhere else the
             // consumer drives, so a static desktop still delivers frames.
             // DISPLAYSWARM_DMABUF=0 forces shared-memory buffers.
+            // Buffer size/stride are offered as ranges everywhere but GNOME: KWin and COSMIC
+            // fix their own and never intersect with one exact value ("no more input
+            // formats" / "error alloc buffers"), while mutter crashed on ranges.
             let drive_graph = desktop != crate::display::model::Desktop::Cosmic;
             let use_dmabuf = std::env::var("DISPLAYSWARM_DMABUF").map(|v| !(v == "0" || v.eq_ignore_ascii_case("false"))).unwrap_or(true);
             let mut cfg = PipeWireConfig::builder()
@@ -333,7 +336,7 @@ pub fn start_screencast_request(
                 .preferred_format(PixelFormat::BGRA)
                 .use_dmabuf(use_dmabuf)
                 .drive_graph(drive_graph)
-                .ranged_buffers(desktop == crate::display::model::Desktop::Cosmic);
+                .ranged_buffers(desktop != crate::display::model::Desktop::Gnome);
             if let Some(m) = virtual_mode {
                 // Mutter sizes the monitor from a fixed-size offer. KWin offers
                 // its own fixed size and changes it when the monitor is resized,
