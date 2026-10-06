@@ -58,7 +58,8 @@ use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hasher};
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
@@ -417,8 +418,20 @@ pub fn request_screencast_node(output_filter: Option<String>) -> Result<Screenca
 /// refused: with a restore token the token is dropped and the dialog asked
 /// once more.
 pub fn request_screencast(req: &ScreencastRequest) -> Result<ScreencastSession, String> {
+    request_screencast_cancellable(req, &Arc::new(AtomicBool::new(false)))
+}
+
+/// Message of the error a cancelled request returns.
+pub const CANCELLED: &str = "cancelled";
+
+/// [`request_screencast`] that gives up as soon as `cancel` is set: the pending
+/// portal request and session are closed, which also dismisses the dialog it
+/// opened. Without this a capturer dropped while its dialog was open (a
+/// reconnect, a role change) left the dialog on screen for the whole
+/// [`RESPONSE_TIMEOUT`], and every new attempt stacked another one on top.
+pub fn request_screencast_cancellable(req: &ScreencastRequest, cancel: &Arc<AtomicBool>) -> Result<ScreencastSession, String> {
     let token_key = req.token_key.as_deref();
-    let session = match request_screencast_once(req) {
+    let session = match request_screencast_once(req, cancel) {
         Ok(s) => s,
         // A saved permission the portal cannot honour (issued to another app
         // id, or for a screen that is gone) fails `Start` outright instead of
@@ -426,7 +439,7 @@ pub fn request_screencast(req: &ScreencastRequest) -> Result<ScreencastSession, 
         Err(e) if !e.contains("dismissed") && restore_token::load_keyed(token_key).is_some() => {
             log::warn!("portal: the request with the saved permission failed ({e}); forgetting it and asking again");
             let _ = restore_token::forget_keyed(token_key);
-            request_screencast_once(req)?
+            request_screencast_once(req, cancel)?
         }
         Err(e) => return Err(e),
     };
@@ -444,7 +457,7 @@ pub fn request_screencast(req: &ScreencastRequest) -> Result<ScreencastSession, 
     drop(session);
     let _ = restore_token::forget_keyed(token_key);
     if had_token {
-        let session = request_screencast_once(req)?;
+        let session = request_screencast_once(req, cancel)?;
         if !wrong_source(req.source_type, session.granted_source_type) {
             return Ok(session);
         }
@@ -515,7 +528,7 @@ fn wrong_source(requested: u32, granted: Option<u32>) -> bool {
     granted.is_some_and(|t| t & requested == 0)
 }
 
-fn request_screencast_once(req: &ScreencastRequest) -> Result<ScreencastSession, String> {
+fn request_screencast_once(req: &ScreencastRequest, cancel: &Arc<AtomicBool>) -> Result<ScreencastSession, String> {
     let output_filter = req.output_filter.clone();
     if let Some(name) = &output_filter {
         log::warn!(
@@ -529,11 +542,21 @@ fn request_screencast_once(req: &ScreencastRequest) -> Result<ScreencastSession,
     let token = restore_token::load_keyed(token_key);
     let token_ref = token.as_deref();
 
-    let portal = Portal::connect()?;
+    let mut portal = Portal::connect()?;
+    portal.cancel = cancel.clone();
     portal.register_app_id(&app_id_for(token_key));
     let session = portal.create_session(token_ref)?;
-    portal.select_sources(&session, req.source_type, PERSIST_MODE_UNTIL_REVOKED, token_ref)?;
-    let (stream, new_token) = portal.start(&session, PERSIST_MODE_UNTIL_REVOKED)?;
+    let started = portal
+        .select_sources(&session, req.source_type, PERSIST_MODE_UNTIL_REVOKED, token_ref)
+        .and_then(|()| portal.start(&session, PERSIST_MODE_UNTIL_REVOKED));
+    let (stream, new_token) = match started {
+        Ok(v) => v,
+        Err(e) => {
+            // Ends the session, and with it any dialog still open for it.
+            portal.close_session(&session);
+            return Err(e);
+        }
+    };
 
     if let Some(tok) = new_token {
         if let Err(e) = restore_token::save_keyed(token_key, &tok) {
@@ -605,6 +628,8 @@ struct Portal {
     /// fails the "must start with `:`" check. Sanitisation happens exactly once,
     /// in `request_object_path`.
     unique: String,
+    /// Set by the caller to abandon the dialogs this connection is waiting on.
+    cancel: Arc<AtomicBool>,
 }
 
 impl Portal {
@@ -641,6 +666,7 @@ impl Portal {
             desktop,
             connection: conn,
             unique,
+            cancel: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -710,7 +736,12 @@ impl Portal {
             })
             .map_err(|e| format!("{stage}: cannot spawn the portal response thread: {e}"))?;
 
-        Ok((handle_token, ResponseWaiter { rx, stage }))
+        Ok((handle_token, ResponseWaiter { rx, stage, cancel: self.cancel.clone() }))
+    }
+
+    /// Best-effort `Session.Close`, so a failed or cancelled attempt leaves no dialog behind.
+    fn close_session(&self, session: &OwnedObjectPath) {
+        let _ = self.connection.call_method(Some(PORTAL_BUS_NAME), session.as_str(), Some(SESSION_INTERFACE), "Close", &());
     }
 
     fn create_session(&self, restore_token: Option<&str>) -> Result<OwnedObjectPath, String> {
@@ -788,22 +819,35 @@ impl Portal {
 struct ResponseWaiter {
     rx: Receiver<Result<ResponseResults, String>>,
     stage: Stage,
+    cancel: Arc<AtomicBool>,
 }
 
 impl ResponseWaiter {
     fn wait(self) -> Result<ResponseResults, String> {
-        match self.rx.recv_timeout(RESPONSE_TIMEOUT) {
-            Ok(result) => result,
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
-                "{}: the portal did not answer within {RESPONSE_TIMEOUT:?}; \
-                 the screen-sharing dialog is probably still open - answer it, or check \
-                 `journalctl --user -u xdg-desktop-portal`",
-                self.stage
-            )),
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(format!(
-                "{}: lost the connection to the desktop portal before it answered",
-                self.stage
-            )),
+        let deadline = std::time::Instant::now() + RESPONSE_TIMEOUT;
+        loop {
+            match self.rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(result) => return result,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if self.cancel.load(Ordering::Acquire) {
+                        return Err(CANCELLED.to_string());
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err(format!(
+                            "{}: the portal did not answer within {RESPONSE_TIMEOUT:?}; \
+                             the screen-sharing dialog is probably still open - answer it, or check \
+                             `journalctl --user -u xdg-desktop-portal`",
+                            self.stage
+                        ));
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(format!(
+                        "{}: lost the connection to the desktop portal before it answered",
+                        self.stage
+                    ))
+                }
+            }
         }
     }
 }

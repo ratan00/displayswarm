@@ -262,7 +262,7 @@ pub fn start_screencast_request(
     let kscreen_before = virtual_mode
         .filter(|_| desktop == crate::display::model::Desktop::Kde)
         .and_then(|_| crate::display::kscreen::state().ok());
-    let mut session = portal::request_screencast(&request).map_err(CaptureError::Portal)?;
+    let mut session = portal::request_screencast_cancellable(&request, &cancel).map_err(CaptureError::Portal)?;
     // KWin can bring the new virtual monitor up as a mirror of the panel (a
     // saved setup says so), and then streams the panel instead. Unmirror it
     // and ask again: the stream is bound to its source when it is created.
@@ -272,7 +272,7 @@ pub fn start_screencast_request(
                 log::warn!("native capture: KWin made {names:?} a mirror, so the stream showed another screen; unmirrored it, starting again");
                 session.close();
                 drop(session);
-                session = portal::request_screencast(&request).map_err(CaptureError::Portal)?;
+                session = portal::request_screencast_cancellable(&request, &cancel).map_err(CaptureError::Portal)?;
                 if let Ok(names) = crate::display::kscreen::unmirror_new_outputs(before) {
                     if !names.is_empty() {
                         log::error!("native capture: {names:?} is still a mirror; the phone will show the screen it mirrors");
