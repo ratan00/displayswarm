@@ -1,7 +1,7 @@
-import { Button, CheckBox, ComboBox, LineEdit, Slider, Switch, TextEdit, ScrollView } from "std-widgets.slint";
+import { Button, ComboBox, LineEdit, Slider, TextEdit, ScrollView, Palette } from "std-widgets.slint";
 
-// One device card. Everything is preformatted by the UI process; the toggles
-// are the DeviceSettings fields the host implements.
+// One device. Everything is preformatted by the UI process; the toggles are
+// the DeviceSettings fields the host implements.
 export struct DeviceRow {
     id: string,
     name: string,
@@ -44,69 +44,379 @@ export struct DiagRow {
     detail: string,
 }
 
+// Colours derived from the system palette, so the window follows the desktop's
+// light or dark theme together with the standard widgets inside it.
+global Theme {
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+    out property <brush> window: Palette.background;
+    out property <brush> sidebar: dark ? #00000030 : #0000000a;
+    out property <brush> card: dark ? #ffffff0c : #ffffffd0;
+    out property <brush> card-border: dark ? #ffffff14 : #00000014;
+    out property <brush> hover: dark ? #ffffff10 : #0000000a;
+    out property <brush> selected: dark ? #ffffff1c : #00000012;
+    out property <brush> text: Palette.foreground;
+    out property <brush> muted: dark ? #ffffff99 : #00000094;
+    out property <brush> faint: dark ? #ffffff66 : #00000066;
+    out property <brush> accent: Palette.accent-background;
+    out property <brush> on-accent: Palette.accent-foreground;
+    out property <color> ok: dark ? #7ad48a : #1f8a3b;
+    out property <color> warn: dark ? #f2c46b : #a35d00;
+    out property <color> bad: dark ? #f28b9b : #c42b3b;
+    out property <color> idle: dark ? #8a8f9c : #9aa0a8;
+    out property <length> radius: 10px;
+}
+
+// Icons: 24x24 outline paths.
+global Icons {
+    out property <string> devices: "M3 5h13v10H3z M7 19h5 M9.5 15v4 M18 8h3v11h-3z";
+    out property <string> settings: "M12 8.5a3.5 3.5 0 1 0 0 7a3.5 3.5 0 1 0 0-7z M12 2v3 M12 19v3 M2 12h3 M19 12h3 M4.9 4.9l2.1 2.1 M17 17l2.1 2.1 M4.9 19.1l2.1-2.1 M17 7l2.1-2.1";
+    out property <string> diagnostics: "M2 12h4l3-7l4 14l3-7h6";
+    out property <string> phone: "M7 2h10v20H7z M11 18h2";
+}
+
+component Icon inherits Path {
+    in property <string> data;
+    in property <brush> tint: Theme.text;
+    width: 18px;
+    height: 18px;
+    viewbox-width: 24;
+    viewbox-height: 24;
+    commands: root.data;
+    stroke: root.tint;
+    stroke-width: 1.6px;
+    fill: transparent;
+}
+
+component Dot inherits Rectangle {
+    in property <color> tint: Theme.idle;
+    in property <bool> pulse: false;
+    width: 9px;
+    height: 9px;
+    border-radius: 4.5px;
+    background: root.tint;
+    if root.pulse: Rectangle {
+        width: 17px;
+        height: 17px;
+        border-radius: 8.5px;
+        background: root.tint.transparentize(0.75);
+    }
+}
+
 // A stateless switch: it shows `checked` and reports the wish to flip it, so
 // the value always comes from the host and no binding is ever overwritten.
-component Toggle inherits HorizontalLayout {
-    in property <string> label;
+component Toggle inherits Rectangle {
     in property <bool> checked;
     in property <bool> enabled: true;
     callback toggled(bool);
-    spacing: 6px;
+    width: 38px;
+    height: 22px;
+    border-radius: 11px;
+    background: root.checked ? Theme.accent : Theme.dark ? #ffffff2a : #0000002a;
+    opacity: root.enabled ? 1.0 : 0.45;
+    animate background { duration: 120ms; }
     Rectangle {
-        width: 34px;
-        height: 18px;
-        y: 1px;
-        border-radius: 9px;
-        background: root.checked ? #89b4fa : #45475a;
-        opacity: root.enabled ? 1.0 : 0.5;
-        Rectangle {
-            width: 14px;
-            height: 14px;
-            y: 2px;
-            x: root.checked ? 18px : 2px;
-            border-radius: 7px;
-            background: #cdd6f4;
-            animate x { duration: 100ms; }
-        }
-        TouchArea {
-            enabled: root.enabled;
-            clicked => { root.toggled(!root.checked); }
-        }
+        width: 16px;
+        height: 16px;
+        y: 3px;
+        x: root.checked ? 19px : 3px;
+        border-radius: 8px;
+        background: root.checked ? Theme.on-accent : #ffffff;
+        drop-shadow-blur: 2px;
+        drop-shadow-color: #00000040;
+        animate x { duration: 120ms; easing: ease-out; }
     }
-    Text { text: root.label; color: #a6adc8; vertical-alignment: center; font-size: 12px; }
+    TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.toggled(!root.checked); }
+    }
 }
 
-component Sparkline inherits VerticalLayout {
+// A white card with an optional heading.
+component Card inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    background: Theme.card;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.card-border;
+    // A layout's minimum can exceed its preferred height (buttons, fields);
+    // size the card by the larger so the last row is never cut off.
+    min-height: inner.min-height;
+    preferred-height: max(inner.min-height, inner.preferred-height);
+    inner := VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+        if root.title != "": VerticalLayout {
+            spacing: 2px;
+            Text { text: root.title; color: Theme.text; font-size: 14px; font-weight: 700; }
+            if root.subtitle != "": Text { text: root.subtitle; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+        }
+        @children
+    }
+}
+
+// A preference row: title and explanation on the left, the control on the right.
+component SettingRow inherits HorizontalLayout {
+    in property <string> title;
+    in property <string> subtitle;
+    spacing: 16px;
+    VerticalLayout {
+        horizontal-stretch: 1;
+        alignment: center;
+        spacing: 2px;
+        Text { text: root.title; color: Theme.text; font-size: 13px; wrap: word-wrap; }
+        if root.subtitle != "": Text { text: root.subtitle; color: Theme.muted; font-size: 11px; wrap: word-wrap; }
+    }
+    @children
+}
+
+component ToggleRow inherits SettingRow {
+    in property <bool> checked;
+    in property <bool> enabled: true;
+    callback toggled(bool);
+    VerticalLayout {
+        alignment: center;
+        Toggle { checked: root.checked; enabled: root.enabled; toggled(v) => { root.toggled(v); } }
+    }
+}
+
+component Divider inherits Rectangle {
+    height: 1px;
+    background: Theme.card-border;
+}
+
+component Chip inherits Rectangle {
+    in property <string> text;
+    in property <brush> tint: Theme.muted;
+    visible: root.text != "";
+    height: 22px;
+    min-width: label.preferred-width + 16px;
+    border-radius: 11px;
+    border-width: 1px;
+    border-color: Theme.card-border;
+    background: Theme.hover;
+    label := Text {
+        text: root.text;
+        color: root.tint;
+        font-size: 11px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// A coloured strip across the top of the content.
+component Callout inherits Rectangle {
+    in property <string> text;
+    in property <color> tint: Theme.warn;
+    in property <string> action;
+    callback activated();
+    min-height: 40px;
+    border-radius: 8px;
+    background: root.tint.transparentize(0.85);
+    border-width: 1px;
+    border-color: root.tint.transparentize(0.55);
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 8px;
+        padding-top: 6px;
+        padding-bottom: 6px;
+        spacing: 10px;
+        VerticalLayout { alignment: center; Dot { tint: root.tint; } }
+        Text {
+            text: root.text;
+            color: Theme.text;
+            font-size: 12px;
+            vertical-alignment: center;
+            wrap: word-wrap;
+            horizontal-stretch: 1;
+        }
+        if root.action != "": Button { text: root.action; clicked => { root.activated(); } }
+    }
+}
+
+component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <string> icon;
+    in property <bool> active;
+    in property <string> badge;
+    callback clicked();
+    height: 36px;
+    border-radius: 8px;
+    background: root.active ? Theme.selected : touch.has-hover ? Theme.hover : transparent;
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 10px;
+        VerticalLayout { alignment: center; Icon { data: root.icon; tint: root.active ? Theme.accent : Theme.muted; } }
+        Text {
+            text: root.label;
+            color: Theme.text;
+            font-size: 13px;
+            font-weight: root.active ? 700 : 400;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+        if root.badge != "" && root.badge != "0": Text {
+            text: root.badge;
+            color: Theme.muted;
+            font-size: 11px;
+            vertical-alignment: center;
+        }
+    }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+// The compact navigation for narrow windows.
+component TabItem inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    callback clicked();
+    height: 32px;
+    border-radius: 8px;
+    background: root.active ? Theme.selected : touch.has-hover ? Theme.hover : transparent;
+    Text {
+        text: root.label;
+        color: Theme.text;
+        font-size: 13px;
+        font-weight: root.active ? 700 : 400;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+component StatTile inherits Rectangle {
     in property <string> caption;
     in property <string> value;
     in property <string> path;
-    in property <color> line: #89b4fa;
-    spacing: 2px;
-    HorizontalLayout {
-        spacing: 6px;
-        Text { text: root.caption; color: #7f849c; font-size: 11px; }
-        Text { text: root.value; color: #cdd6f4; font-size: 11px; font-weight: 600; }
-    }
-    Rectangle {
-        height: 28px;
-        width: 120px;
-        background: #181825;
-        border-radius: 3px;
-        Path {
-            width: 100%;
-            height: 100%;
+    border-radius: 8px;
+    background: Theme.hover;
+    min-width: 120px;
+    VerticalLayout {
+        padding: 10px;
+        spacing: 4px;
+        Text { text: root.caption; color: Theme.muted; font-size: 11px; }
+        Text { text: root.value == "" ? "\u{2013}" : root.value; color: Theme.text; font-size: 17px; font-weight: 700; }
+        if root.path != "": Path {
+            height: 28px;
             viewbox-width: 120;
             viewbox-height: 28;
             commands: root.path;
-            stroke: root.line;
+            stroke: Theme.accent;
             stroke-width: 1.5px;
         }
     }
 }
 
-component DeviceCard inherits Rectangle {
+// A device in the list on the left of the Devices page.
+component DeviceListItem inherits Rectangle {
     in property <DeviceRow> dev;
-    in property <[string]> role-names;
+    in property <string> role-name;
+    in property <bool> active;
+    callback clicked();
+    height: 56px;
+    border-radius: 8px;
+    background: root.active ? Theme.selected : touch.has-hover ? Theme.hover : transparent;
+    border-width: root.dev.flashing || (root.dev.needs-role && root.dev.connected) ? 1px : 0px;
+    border-color: root.dev.flashing ? Theme.warn : Theme.warn.transparentize(0.4);
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 32px;
+                height: 32px;
+                border-radius: 8px;
+                background: Theme.hover;
+                Icon { data: Icons.phone; tint: root.dev.connected ? Theme.accent : Theme.faint; }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            horizontal-stretch: 1;
+            Text { text: root.dev.name; color: Theme.text; font-size: 13px; font-weight: 600; overflow: elide; }
+            Text {
+                text: !root.dev.connected ? "Offline"
+                    : root.dev.needs-role ? "Needs a role"
+                    : root.dev.transport != "" ? root.role-name + " \u{b7} " + root.dev.transport
+                    : root.role-name;
+                color: root.dev.connected && root.dev.needs-role ? Theme.warn : Theme.muted;
+                font-size: 11px;
+                overflow: elide;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            Dot {
+                tint: root.dev.connected ? Theme.ok : Theme.idle;
+            }
+        }
+    }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+// The device as a chip in the narrow layout.
+component DeviceChip inherits Rectangle {
+    in property <DeviceRow> dev;
+    in property <bool> active;
+    callback clicked();
+    height: 32px;
+    min-width: row.preferred-width;
+    border-radius: 16px;
+    background: root.active ? Theme.selected : touch.has-hover ? Theme.hover : transparent;
+    border-width: 1px;
+    border-color: root.dev.connected && root.dev.needs-role ? Theme.warn : Theme.card-border;
+    row := HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 8px;
+        VerticalLayout { alignment: center; Dot { tint: root.dev.connected ? Theme.ok : Theme.idle; } }
+        Text { text: root.dev.name; color: Theme.text; font-size: 12px; vertical-alignment: center; }
+    }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+// One choice in the role picker.
+component RoleTile inherits Rectangle {
+    in property <string> title;
+    in property <string> blurb;
+    in property <bool> available: true;
+    in property <string> reason;
+    in property <bool> active;
+    callback clicked();
+    horizontal-stretch: 1;
+    min-width: 140px;
+    min-height: col.preferred-height;
+    border-radius: 8px;
+    border-width: root.active ? 2px : 1px;
+    border-color: root.active ? Theme.accent : Theme.card-border;
+    background: root.active ? Theme.accent.transparentize(0.88) : touch.has-hover && root.available ? Theme.hover : transparent;
+    opacity: root.available ? 1.0 : 0.55;
+    col := VerticalLayout {
+        padding: 10px;
+        spacing: 3px;
+        Text { text: root.title; color: Theme.text; font-size: 13px; font-weight: 700; wrap: word-wrap; }
+        Text {
+            text: root.available ? root.blurb : root.reason;
+            color: Theme.muted;
+            font-size: 11px;
+            wrap: word-wrap;
+        }
+    }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+component DeviceDetail inherits VerticalLayout {
+    in property <DeviceRow> dev;
+    in property <[string]> role-titles;
+    in property <[bool]> role-available;
+    in property <[string]> role-reasons;
+    in property <bool> narrow;
     callback set-role(int);
     callback toggle-setting(int, bool);
     callback set-quality(int);
@@ -116,198 +426,215 @@ component DeviceCard inherits Rectangle {
     callback forget();
     callback identify();
 
-    background: #1e1e2e;
-    border-radius: 8px;
-    border-width: 2px;
-    border-color: root.dev.flashing ? #f9e2af : root.dev.needs-role ? #fab387 : #313244;
-    height: content.height + 32px;
+    property <[string]> blurbs: [
+        "Show the laptop screen",
+        "A new monitor next to the laptop's",
+        "Show one app window",
+        "The phone becomes the main screen",
+        "Pen and touch drive a laptop monitor",
+        "Touchpad and keyboard for the laptop",
+    ];
 
-    content := VerticalLayout {
-        x: 12px;
-        y: 12px;
-        width: parent.width - 24px;
-        // The layout's own minimum can exceed its preferred height (buttons, combo boxes),
-        // which pushed the last row out of the card.
-        height: max(self.preferred-height, self.min-height);
-        spacing: 8px;
+    spacing: 14px;
 
+    // Header
+    HorizontalLayout {
+        spacing: 12px;
+        Rectangle {
+            width: 44px;
+            height: 44px;
+            border-radius: 10px;
+            background: root.dev.connected ? Theme.accent.transparentize(0.85) : Theme.hover;
+            Icon { data: Icons.phone; width: 24px; height: 24px; tint: root.dev.connected ? Theme.accent : Theme.faint; }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+            Text { text: root.dev.name; color: Theme.text; font-size: 20px; font-weight: 700; overflow: elide; }
+            Text { text: root.dev.state; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 4px;
+            Chip { text: root.dev.transport; tint: Theme.accent; }
+            Chip { text: root.dev.resolution; }
+        }
+    }
+
+    if root.dev.flashing: Callout { text: "Identifying \u{2013} look for the flashing screen."; tint: Theme.warn; }
+
+    // Role
+    Card {
+        title: "What this device does";
+        subtitle: root.dev.needs-role ? "Choose a role to start using it." : "";
         HorizontalLayout {
             spacing: 8px;
-            Rectangle {
-                width: 10px;
-                height: 10px;
-                y: 6px;
-                border-radius: 5px;
-                background: root.dev.connected ? #a6e3a1 : #585b70;
+            RoleTile {
+                title: root.role-titles[0]; blurb: root.blurbs[0]; available: root.role-available[0]; reason: root.role-reasons[0];
+                active: root.dev.role-index == 0; clicked => { root.set-role(0); }
             }
-            Text {
-                text: root.dev.name;
-                color: #cdd6f4;
-                font-size: 15px;
-                font-weight: 700;
-                horizontal-stretch: 1;
-                overflow: elide;
+            RoleTile {
+                title: root.role-titles[1]; blurb: root.blurbs[1]; available: root.role-available[1]; reason: root.role-reasons[1];
+                active: root.dev.role-index == 1; clicked => { root.set-role(1); }
             }
-            Text {
-                text: root.dev.transport;
-                color: #94e2d5;
-                font-size: 11px;
-                vertical-alignment: center;
-            }
-            Text {
-                text: root.dev.resolution;
-                color: #a6adc8;
-                font-size: 11px;
-                vertical-alignment: center;
+            if !root.narrow: RoleTile {
+                title: root.role-titles[2]; blurb: root.blurbs[2]; available: root.role-available[2]; reason: root.role-reasons[2];
+                active: root.dev.role-index == 2; clicked => { root.set-role(2); }
             }
         }
-
-        Text {
-            text: root.dev.state;
-            color: root.dev.needs-role ? #fab387 : #a6adc8;
-            font-size: 12px;
-            wrap: word-wrap;
+        if root.narrow: HorizontalLayout {
+            spacing: 8px;
+            RoleTile {
+                title: root.role-titles[2]; blurb: root.blurbs[2]; available: root.role-available[2]; reason: root.role-reasons[2];
+                active: root.dev.role-index == 2; clicked => { root.set-role(2); }
+            }
+            RoleTile {
+                title: root.role-titles[3]; blurb: root.blurbs[3]; available: root.role-available[3]; reason: root.role-reasons[3];
+                active: root.dev.role-index == 3; clicked => { root.set-role(3); }
+            }
         }
-
         HorizontalLayout {
             spacing: 8px;
-            Text { text: "Role"; color: #7f849c; vertical-alignment: center; font-size: 12px; }
-            ComboBox {
-                model: root.role-names;
-                current-index: max(root.dev.role-index, 0);
-                selected(_) => { root.set-role(self.current-index); }
+            if !root.narrow: RoleTile {
+                title: root.role-titles[3]; blurb: root.blurbs[3]; available: root.role-available[3]; reason: root.role-reasons[3];
+                active: root.dev.role-index == 3; clicked => { root.set-role(3); }
             }
-            if root.dev.needs-role: Text {
-                text: "\u{2190} choose one";
-                color: #fab387;
-                vertical-alignment: center;
-                font-size: 12px;
+            RoleTile {
+                title: root.role-titles[4]; blurb: root.blurbs[4]; available: root.role-available[4]; reason: root.role-reasons[4];
+                active: root.dev.role-index == 4; clicked => { root.set-role(4); }
             }
-            if root.dev.show-target: LineEdit {
-                placeholder-text: "Monitor (e.g. eDP-1), empty = ask";
+            RoleTile {
+                title: root.role-titles[5]; blurb: root.blurbs[5]; available: root.role-available[5]; reason: root.role-reasons[5];
+                active: root.dev.role-index == 5; clicked => { root.set-role(5); }
+            }
+        }
+        if root.dev.show-target: SettingRow {
+            title: "Laptop monitor";
+            subtitle: "e.g. eDP-1; empty asks each time";
+            LineEdit {
+                width: 180px;
+                placeholder-text: "Ask";
                 text: root.dev.target-output;
                 accepted(t) => { root.set-target(t); }
             }
         }
+    }
 
-        if root.dev.connected && root.dev.fps-text != "": HorizontalLayout {
-            spacing: 16px;
-            Sparkline {
-                caption: "Latency";
-                value: root.dev.latency-text;
-                path: root.dev.latency-path;
-                line: #f38ba8;
-            }
-            Sparkline {
-                caption: "Bitrate";
-                value: root.dev.bitrate-text;
-                path: root.dev.bitrate-path;
-                line: #89b4fa;
-            }
-            Text {
-                text: root.dev.fps-text;
-                color: #cdd6f4;
-                font-size: 12px;
-                vertical-alignment: center;
-            }
-        }
-
+    // Live statistics
+    if root.dev.connected && root.dev.fps-text != "": Card {
+        title: "Live";
         HorizontalLayout {
             spacing: 8px;
-            Text { text: "Picture quality"; color: #7f849c; vertical-alignment: center; font-size: 12px; }
+            StatTile { caption: "Latency"; value: root.dev.latency-text; path: root.dev.latency-path; }
+            StatTile { caption: "Bitrate"; value: root.dev.bitrate-text; path: root.dev.bitrate-path; }
+            StatTile { caption: "Frame rate"; value: root.dev.fps-text; }
+        }
+    }
+
+    Card {
+        title: "Picture and sound";
+        SettingRow {
+            title: "Picture quality";
+            subtitle: "Auto adapts the bitrate to the link.";
             ComboBox {
-                model: ["Auto (adaptive bitrate)", "Maximum (best quality)", "Balanced (in between)", "Data saver (low quality)"];
+                width: 220px;
+                model: ["Auto (adaptive)", "Maximum quality", "Balanced", "Data saver"];
                 current-index: root.dev.quality-index;
                 selected(_) => { root.set-quality(self.current-index); }
             }
         }
-
-        HorizontalLayout {
-            spacing: 14px;
-            alignment: start;
-            Toggle { label: "Audio"; checked: root.dev.audio-out; toggled(v) => { root.toggle-setting(0, v); } }
-            Toggle { label: "Mic"; checked: root.dev.mic; toggled(v) => { root.toggle-setting(1, v); } }
-            Toggle { label: "Clipboard"; checked: root.dev.clipboard; toggled(v) => { root.toggle-setting(2, v); } }
-            Toggle { label: "Battery saver"; checked: root.dev.battery-saver; toggled(v) => { root.toggle-setting(3, v); } }
+        Divider { }
+        ToggleRow {
+            title: "Play laptop audio on the device";
+            checked: root.dev.audio-out;
+            toggled(v) => { root.toggle-setting(0, v); }
         }
-        if root.dev.audio-out: HorizontalLayout {
-            spacing: 8px;
-            Text { text: "Audio mode"; color: #7f849c; vertical-alignment: center; font-size: 12px; }
+        if root.dev.audio-out: SettingRow {
+            title: "Audio output";
             ComboBox {
+                width: 260px;
                 model: ["Separate output (pick it in sound settings)", "Play along with the laptop speakers", "Replace the laptop speakers"];
                 current-index: root.dev.audio-mode;
                 selected(_) => { root.set-audio-mode(self.current-index); }
             }
         }
-        if root.dev.audio-out && root.dev.audio-mode == 1: Toggle {
-            label: "Delay the laptop speakers so both sound together";
+        if root.dev.audio-out && root.dev.audio-mode == 1: ToggleRow {
+            title: "Delay the laptop speakers";
+            subtitle: "So the laptop and the device sound together.";
             checked: root.dev.delay-host;
             toggled(v) => { root.toggle-setting(8, v); }
         }
-        if root.dev.show-panel-off: Toggle {
-            label: "Turn the laptop panel off while the phone is the main screen";
+        Divider { }
+        ToggleRow {
+            title: "Use the device's microphone";
+            subtitle: "Appears as a microphone on this computer.";
+            checked: root.dev.mic;
+            toggled(v) => { root.toggle-setting(1, v); }
+        }
+    }
+
+    Card {
+        title: "Extras";
+        ToggleRow {
+            title: "Shared clipboard";
+            checked: root.dev.clipboard;
+            toggled(v) => { root.toggle-setting(2, v); }
+        }
+        ToggleRow {
+            title: "Battery saver";
+            subtitle: "Lower frame rate and bitrate while the device is on battery.";
+            checked: root.dev.battery-saver;
+            toggled(v) => { root.toggle-setting(3, v); }
+        }
+        if root.dev.show-panel-off: ToggleRow {
+            title: "Turn the laptop panel off";
+            subtitle: "While the device is the main screen.";
             checked: root.dev.panel-off;
             toggled(v) => { root.toggle-setting(4, v); }
         }
+    }
 
+    HorizontalLayout {
+        spacing: 8px;
+        Button { text: "Identify"; clicked => { root.identify(); } }
+        Button { text: "Disconnect"; enabled: root.dev.connected; clicked => { root.disconnect(); } }
+        Rectangle { horizontal-stretch: 1; }
+        Button { text: "Forget device"; clicked => { root.forget(); } }
+    }
+}
+
+component EmptyDevices inherits Rectangle {
+    VerticalLayout {
+        alignment: center;
+        spacing: 10px;
         HorizontalLayout {
-            spacing: 8px;
-            alignment: end;
-            Button { text: "Identify"; clicked => { root.identify(); } }
-            Button { text: "Disconnect"; enabled: root.dev.connected; clicked => { root.disconnect(); } }
-            Button { text: "Forget"; clicked => { root.forget(); } }
+            alignment: center;
+            Rectangle {
+                width: 64px;
+                height: 64px;
+                border-radius: 16px;
+                background: Theme.hover;
+                Icon { data: Icons.phone; width: 32px; height: 32px; tint: Theme.faint; }
+            }
+        }
+        Text { text: "No devices yet"; color: Theme.text; font-size: 16px; font-weight: 700; horizontal-alignment: center; }
+        Text {
+            text: "Plug a phone or tablet in by USB and open the DisplaySwarm app,\nor pick this computer from the list in the app over Wi-Fi.";
+            color: Theme.muted;
+            font-size: 12px;
+            horizontal-alignment: center;
         }
     }
-}
-
-component TabButton inherits Rectangle {
-    in property <string> label;
-    in property <bool> active;
-    callback clicked();
-    height: 34px;
-    border-radius: 6px;
-    background: root.active ? #313244 : touch.has-hover ? #2a2a3c : transparent;
-    Text {
-        text: root.label;
-        color: root.active ? #cdd6f4 : #a6adc8;
-        font-weight: root.active ? 700 : 400;
-        horizontal-alignment: center;
-        vertical-alignment: center;
-    }
-    touch := TouchArea { clicked => { root.clicked(); } }
-}
-
-component Section inherits Rectangle {
-    in property <string> title;
-    background: #1e1e2e;
-    border-radius: 8px;
-    height: box.height + 32px;
-    box := VerticalLayout {
-        x: 14px;
-        y: 12px;
-        width: parent.width - 28px;
-        // Minimum sizes of buttons and fields can exceed the preferred height; use the larger
-        // so the last row stays inside the box.
-        height: max(self.preferred-height, self.min-height);
-        spacing: 8px;
-        Text { text: root.title; color: #89b4fa; font-size: 14px; font-weight: 600; }
-        @children
-    }
-}
-
-component Row inherits HorizontalLayout {
-    in property <string> label;
-    spacing: 12px;
-    Text { text: root.label; color: #a6adc8; vertical-alignment: center; width: 150px; font-size: 12px; }
-    @children
 }
 
 export component MainWindow inherits Window {
     title: "DisplaySwarm";
-    preferred-width: 760px;
-    preferred-height: 800px;
-    min-width: 560px;
-    background: #181825;
+    preferred-width: 980px;
+    preferred-height: 760px;
+    min-width: 480px;
+    min-height: 480px;
+    background: Theme.window;
     default-font-family: "sans-serif";
 
     // -- connection to the daemon
@@ -321,8 +648,15 @@ export component MainWindow inherits Window {
 
     // -- devices
     in-out property <[DeviceRow]> devices: [];
+    // Role names for drop-downs; one this desktop cannot do says so.
     in-out property <[string]> role-names: [];
+    // The same roles as plain names, whether each is available here and why not.
+    in-out property <[string]> role-titles: ["Mirror", "Extend", "Mirror window", "Phone as main screen", "Drawing tablet", "Input pad"];
+    in-out property <[bool]> role-available: [true, true, true, true, true, true];
+    in-out property <[string]> role-reasons: ["", "", "", "", "", ""];
     in-out property <string> pending-device-name: "";
+    // Index into `devices` of the device shown in detail.
+    in-out property <int> selected-device: 0;
 
     // -- global settings
     in-out property <string> port-text: "9999";
@@ -372,245 +706,434 @@ export component MainWindow inherits Window {
     callback set-video-quality(string, int);
     callback open-firewall();
 
-    VerticalLayout {
-        padding: 16px;
-        spacing: 10px;
+    // Set from the width rather than bound to it: the layout's minimum width
+    // depends on it, and a binding would be a loop.
+    property <bool> narrow: false;
+    changed width => { root.narrow = self.width < 760px; }
+    property <int> sel: max(0, min(root.selected-device, root.devices.length - 1));
 
-        // Header
-        HorizontalLayout {
-            spacing: 12px;
-            Text {
-                text: "DisplaySwarm";
-                font-size: 20px;
-                font-weight: 700;
-                color: #cdd6f4;
-                vertical-alignment: center;
-            }
-            Rectangle { horizontal-stretch: 1; }
-            Text {
-                text: root.server-status;
-                color: #a6adc8;
-                font-size: 12px;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-            Button {
-                text: root.server-running ? "Stop server" : "Start server";
-                enabled: root.daemon-connected;
-                clicked => { root.toggle-server(); }
-            }
+    function go(t: int) {
+        root.tab = t;
+        if t == 2 {
+            root.refresh-diagnostics();
+            root.refresh-logs();
         }
+    }
 
-        if !root.daemon-connected || root.banner != "": Rectangle {
-            height: 30px;
-            border-radius: 6px;
-            background: #45475a;
-            Text {
-                text: root.banner;
-                color: #f9e2af;
-                font-size: 12px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-        }
-
-        if root.pending-device-name != "": Rectangle {
-            height: 34px;
-            border-radius: 6px;
-            background: #fab387;
-            Text {
-                text: root.pending-device-name + " connected \u{2013} choose what to use it for below.";
-                color: #11111b;
-                font-weight: 600;
-                font-size: 12px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
-            }
-        }
-
-        HorizontalLayout {
-            spacing: 6px;
-            TabButton { label: "Devices"; active: root.tab == 0; clicked => { root.tab = 0; } }
-            TabButton { label: "Settings"; active: root.tab == 1; clicked => { root.tab = 1; } }
-            TabButton {
-                label: "Diagnostics";
-                active: root.tab == 2;
-                clicked => { root.tab = 2; root.refresh-diagnostics(); root.refresh-logs(); }
-            }
-        }
-
-        // ---- Devices
-        if root.tab == 0: ScrollView {
+    HorizontalLayout {
+        // ---- Sidebar (wide windows)
+        if !root.narrow: Rectangle {
+            width: 220px;
+            background: Theme.sidebar;
             VerticalLayout {
-                spacing: 10px;
-                padding-right: 6px;
-                if root.devices.length == 0: Rectangle {
-                    height: 120px;
+                padding: 14px;
+                padding-top: 18px;
+                spacing: 4px;
+                HorizontalLayout {
+                    padding-left: 8px;
+                    padding-bottom: 14px;
+                    spacing: 10px;
+                    Rectangle {
+                        width: 30px;
+                        height: 30px;
+                        border-radius: 8px;
+                        background: Theme.accent;
+                        Icon { data: Icons.devices; tint: Theme.on-accent; }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        Text { text: "DisplaySwarm"; color: Theme.text; font-size: 15px; font-weight: 800; }
+                        Text { text: "Phones as displays"; color: Theme.muted; font-size: 11px; }
+                    }
+                }
+                NavItem {
+                    label: "Devices";
+                    icon: Icons.devices;
+                    badge: root.devices.length;
+                    active: root.tab == 0;
+                    clicked => { root.go(0); }
+                }
+                NavItem { label: "Settings"; icon: Icons.settings; active: root.tab == 1; clicked => { root.go(1); } }
+                NavItem { label: "Diagnostics"; icon: Icons.diagnostics; active: root.tab == 2; clicked => { root.go(2); } }
+                Rectangle { vertical-stretch: 1; }
+
+                // Server status
+                Rectangle {
+                    border-radius: Theme.radius;
+                    background: Theme.card;
+                    border-width: 1px;
+                    border-color: Theme.card-border;
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 8px;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            VerticalLayout {
+                                alignment: center;
+                                Dot {
+                                    tint: !root.daemon-connected ? Theme.bad : root.server-running ? Theme.ok : Theme.idle;
+                                }
+                            }
+                            Text {
+                                text: !root.daemon-connected ? "Daemon offline" : root.server-running ? "Server running" : "Server stopped";
+                                color: Theme.text;
+                                font-size: 12px;
+                                font-weight: 700;
+                            }
+                        }
+                        if root.server-status != "": Text { text: root.server-status; color: Theme.muted; font-size: 11px; wrap: word-wrap; }
+                        if root.client-info != "": Text { text: root.client-info; color: Theme.muted; font-size: 11px; wrap: word-wrap; }
+                        Button {
+                            text: root.server-running ? "Stop server" : "Start server";
+                            enabled: root.daemon-connected;
+                            clicked => { root.toggle-server(); }
+                        }
+                    }
+                }
+            }
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            padding: root.narrow ? 12px : 20px;
+            spacing: 12px;
+
+            // ---- Top bar (narrow windows)
+            if root.narrow: VerticalLayout {
+                spacing: 8px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    VerticalLayout {
+                        alignment: center;
+                        Dot {
+                            tint: !root.daemon-connected ? Theme.bad : root.server-running ? Theme.ok : Theme.idle;
+                        }
+                    }
+                    Text { text: "DisplaySwarm"; color: Theme.text; font-size: 16px; font-weight: 800; vertical-alignment: center; }
                     Text {
-                        text: "No devices yet.\nPlug the phone in by USB and open the DisplaySwarm app.";
-                        color: #7f849c;
-                        horizontal-alignment: center;
+                        text: root.server-status;
+                        color: Theme.muted;
+                        font-size: 11px;
+                        overflow: elide;
+                        horizontal-stretch: 1;
                         vertical-alignment: center;
                     }
+                    Button {
+                        text: root.server-running ? "Stop" : "Start";
+                        enabled: root.daemon-connected;
+                        clicked => { root.toggle-server(); }
+                    }
                 }
-                for dev in root.devices: DeviceCard {
-                    dev: dev;
-                    role-names: root.role-names;
-                    set-role(idx) => { root.set-device-role(dev.id, idx); }
-                    toggle-setting(kind, v) => { root.toggle-setting(dev.id, kind, v); }
-                    set-quality(q) => { root.set-video-quality(dev.id, q); }
-                    set-audio-mode(m) => { root.set-audio-mode(dev.id, m); }
-                    set-target(t) => { root.set-target-output(dev.id, t); }
-                    disconnect => { root.disconnect-device(dev.id); }
-                    forget => { root.forget-device(dev.id); }
-                    identify => { root.identify-device(dev.id); }
+                HorizontalLayout {
+                    spacing: 4px;
+                    TabItem { label: "Devices"; active: root.tab == 0; clicked => { root.go(0); } }
+                    TabItem { label: "Settings"; active: root.tab == 1; clicked => { root.go(1); } }
+                    TabItem { label: "Diagnostics"; active: root.tab == 2; clicked => { root.go(2); } }
                 }
             }
-        }
 
-        // ---- Settings
-        if root.tab == 1: ScrollView {
-            VerticalLayout {
+            if !root.daemon-connected || root.banner != "": Callout {
+                text: root.banner != "" ? root.banner : "Not connected to the DisplaySwarm daemon.";
+                tint: Theme.warn;
+            }
+
+            if root.pending-device-name != "" && root.tab != 0: Callout {
+                text: root.pending-device-name + " connected. Choose what to use it for.";
+                tint: Theme.accent;
+                action: "Choose";
+                activated => { root.go(0); }
+            }
+
+            // ---- Devices
+            if root.tab == 0 && root.devices.length == 0: EmptyDevices { vertical-stretch: 1; }
+
+            if root.tab == 0 && root.devices.length > 0 && !root.narrow: HorizontalLayout {
+                spacing: 16px;
+                vertical-stretch: 1;
+                VerticalLayout {
+                    width: 240px;
+                    spacing: 8px;
+                    Text { text: "Devices"; color: Theme.muted; font-size: 11px; font-weight: 700; }
+                    ScrollView {
+                        VerticalLayout {
+                            alignment: start;
+                            spacing: 2px;
+                            for dev[i] in root.devices: DeviceListItem {
+                                dev: dev;
+                                role-name: dev.role-index >= 0 ? root.role-titles[dev.role-index] : "";
+                                active: i == root.sel;
+                                clicked => { root.selected-device = i; }
+                            }
+                        }
+                    }
+                }
+                ScrollView {
+                    horizontal-stretch: 1;
+                    VerticalLayout {
+                        padding-right: 10px;
+                        padding-bottom: 10px;
+                        alignment: start;
+                        for dev[i] in root.devices: VerticalLayout {
+                            if i == root.sel: DeviceDetail {
+                                dev: dev;
+                                narrow: false;
+                                role-titles: root.role-titles;
+                                role-available: root.role-available;
+                                role-reasons: root.role-reasons;
+                                set-role(idx) => { root.set-device-role(dev.id, idx); }
+                                toggle-setting(kind, v) => { root.toggle-setting(dev.id, kind, v); }
+                                set-quality(q) => { root.set-video-quality(dev.id, q); }
+                                set-audio-mode(m) => { root.set-audio-mode(dev.id, m); }
+                                set-target(t) => { root.set-target-output(dev.id, t); }
+                                disconnect => { root.disconnect-device(dev.id); }
+                                forget => { root.forget-device(dev.id); }
+                                identify => { root.identify-device(dev.id); }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if root.tab == 0 && root.devices.length > 0 && root.narrow: VerticalLayout {
                 spacing: 10px;
-                padding-right: 6px;
+                vertical-stretch: 1;
+                if root.devices.length > 1: ScrollView {
+                    height: 40px;
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: 6px;
+                        for dev[i] in root.devices: DeviceChip {
+                            dev: dev;
+                            active: i == root.sel;
+                            clicked => { root.selected-device = i; }
+                        }
+                    }
+                }
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        padding-right: 10px;
+                        padding-bottom: 10px;
+                        alignment: start;
+                        for dev[i] in root.devices: VerticalLayout {
+                            if i == root.sel: DeviceDetail {
+                                dev: dev;
+                                narrow: true;
+                                role-titles: root.role-titles;
+                                role-available: root.role-available;
+                                role-reasons: root.role-reasons;
+                                set-role(idx) => { root.set-device-role(dev.id, idx); }
+                                toggle-setting(kind, v) => { root.toggle-setting(dev.id, kind, v); }
+                                set-quality(q) => { root.set-video-quality(dev.id, q); }
+                                set-audio-mode(m) => { root.set-audio-mode(dev.id, m); }
+                                set-target(t) => { root.set-target-output(dev.id, t); }
+                                disconnect => { root.disconnect-device(dev.id); }
+                                forget => { root.forget-device(dev.id); }
+                                identify => { root.identify-device(dev.id); }
+                            }
+                        }
+                    }
+                }
+            }
 
-                Section {
-                    title: "Streaming";
-                    Row {
-                        label: "Encoder";
-                        Text { text: root.encoder-text; color: #cdd6f4; vertical-alignment: center; font-size: 12px; }
-                    }
-                    Row {
-                        label: "Transports";
-                        Text { text: root.transports-text; color: #cdd6f4; vertical-alignment: center; font-size: 12px; wrap: word-wrap; }
-                    }
-                    Row {
-                        label: "Listen port";
-                        LineEdit { text <=> root.port-text; }
-                    }
-                    Row {
-                        label: "Target FPS (" + root.fps + ")";
-                        Slider {
-                            minimum: 30;
-                            maximum: 120;
-                            value: root.fps;
-                            changed(v) => { root.fps = Math.round(v); }
+            // ---- Settings
+            if root.tab == 1: ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    padding-right: 10px;
+                    padding-bottom: 10px;
+                    spacing: 14px;
+                    alignment: start;
+
+                    Card {
+                        title: "Streaming";
+                        subtitle: "Defaults for every device. Press Apply to use them.";
+                        SettingRow {
+                            title: "Encoder";
+                            Text { text: root.encoder-text; color: Theme.muted; font-size: 12px; vertical-alignment: center; }
+                        }
+                        SettingRow {
+                            title: "Transports";
+                            Text {
+                                text: root.transports-text;
+                                color: Theme.muted;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                horizontal-alignment: right;
+                                wrap: word-wrap;
+                                max-width: 320px;
+                            }
+                        }
+                        Divider { }
+                        SettingRow {
+                            title: "Listen port";
+                            subtitle: "TCP port for Wi-Fi connections.";
+                            LineEdit { width: 120px; text <=> root.port-text; }
+                        }
+                        SettingRow {
+                            title: "Target frame rate";
+                            subtitle: root.fps + " fps";
+                            Slider {
+                                width: 220px;
+                                minimum: 30;
+                                maximum: 120;
+                                value: root.fps;
+                                changed(v) => { root.fps = Math.round(v); }
+                            }
+                        }
+                        SettingRow {
+                            title: "Bitrate ceiling";
+                            subtitle: root.bitrate-mbps + " Mbps";
+                            Slider {
+                                width: 220px;
+                                minimum: 5;
+                                maximum: 50;
+                                value: root.bitrate-mbps;
+                                changed(v) => { root.bitrate-mbps = Math.round(v); }
+                            }
+                        }
+                        Divider { }
+                        ToggleRow {
+                            title: "Ask what to do with new devices";
+                            subtitle: root.default-role-index == 0 ? "A new device waits until you choose its role." : "New devices start with the role below.";
+                            checked: root.default-role-index == 0;
+                            toggled(v) => { root.default-role-index = v ? 0 : 1; }
+                        }
+                        if root.default-role-index != 0: SettingRow {
+                            title: "Role for new devices";
+                            ComboBox {
+                                width: 240px;
+                                model: root.role-names;
+                                current-index: max(root.default-role-index - 1, 0);
+                                selected(_) => { root.default-role-index = self.current-index + 1; }
+                            }
+                        }
+                        ToggleRow {
+                            title: "Keep all devices' audio in sync";
+                            subtitle: "Delays the fastest device to match the slowest.";
+                            checked: root.audio-sync;
+                            toggled(v) => { root.audio-sync = v; }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Button { text: "Apply"; primary: true; enabled: root.daemon-connected; clicked => { root.apply-settings(); } }
+                            Button { text: "Sync audio now"; enabled: root.daemon-connected; clicked => { root.sync-audio-now(); } }
+                            Text {
+                                text: root.settings-status;
+                                color: Theme.muted;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                wrap: word-wrap;
+                                horizontal-stretch: 1;
+                            }
                         }
                     }
-                    Row {
-                        label: "Bitrate (" + root.bitrate-mbps + " Mbps)";
-                        Slider {
-                            minimum: 5;
-                            maximum: 50;
-                            value: root.bitrate-mbps;
-                            changed(v) => { root.bitrate-mbps = Math.round(v); }
+
+                    Card {
+                        title: "Wi-Fi";
+                        if root.wifi-status != "": Text { text: root.wifi-status; color: Theme.text; font-size: 13px; wrap: word-wrap; }
+                        if root.wifi-detail != "": Text { text: root.wifi-detail; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+                        if root.wifi-firewall != "": Callout {
+                            text: "The " + root.wifi-firewall + " firewall may block devices on the network.";
+                            tint: Theme.warn;
+                            action: "Open port";
+                            activated => { root.open-firewall(); }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            Button { text: "Pair a device (PIN)"; clicked => { root.start-pairing(); } }
+                            Button { text: "Refresh"; clicked => { root.refresh-wifi(); } }
                         }
                     }
-                    Row {
-                        label: "Default role";
-                        ComboBox {
-                            model: root.role-names;
-                            current-index: max(root.default-role-index - 1, 0);
-                            selected(_) => { root.default-role-index = self.current-index + 1; }
+
+                    Card {
+                        title: "General";
+                        ToggleRow {
+                            title: "Start DisplaySwarm when I log in";
+                            checked: root.start-on-login;
+                            toggled(v) => { root.set-start-on-login(v); }
                         }
-                        Button { text: "Ask each time"; clicked => { root.default-role-index = 0; } }
-                        Text {
-                            text: root.default-role-index == 0 ? "asks" : "applied to new devices";
-                            color: #7f849c;
-                            vertical-alignment: center;
+                        SettingRow {
+                            title: "Tray icon";
+                            Text {
+                                text: root.tray-text;
+                                color: Theme.muted;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                horizontal-alignment: right;
+                                wrap: word-wrap;
+                                max-width: 320px;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---- Diagnostics
+            if root.tab == 2: ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    padding-right: 10px;
+                    padding-bottom: 10px;
+                    spacing: 14px;
+                    alignment: start;
+
+                    Card {
+                        title: "System checks";
+                        subtitle: root.backend-text != "" ? "Desktop: " + root.backend-text : "";
+                        for d in root.diagnostics: HorizontalLayout {
+                            spacing: 10px;
+                            Rectangle {
+                                width: 20px;
+                                height: 20px;
+                                border-radius: 10px;
+                                background: (d.status == 0 ? Theme.ok : d.status == 1 ? Theme.warn : Theme.bad).transparentize(0.8);
+                                Text {
+                                    text: d.status == 0 ? "\u{2713}" : d.status == 1 ? "!" : "\u{2715}";
+                                    color: d.status == 0 ? Theme.ok : d.status == 1 ? Theme.warn : Theme.bad;
+                                    font-size: 11px;
+                                    font-weight: 800;
+                                }
+                            }
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                spacing: 1px;
+                                Text { text: d.name; color: Theme.text; font-size: 13px; font-weight: 600; }
+                                Text { text: d.detail; color: Theme.muted; font-size: 12px; wrap: word-wrap; }
+                            }
+                        }
+                        if root.diagnostics.length == 0: Text { text: "Checks run when this page opens."; color: Theme.muted; font-size: 12px; }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            Button { text: "Re-run checks"; clicked => { root.refresh-diagnostics(); } }
+                            Button { text: "Set up virtual display"; clicked => { root.setup-display(); } }
+                        }
+                        if root.display-status-text != "": Text { text: root.display-status-text; color: Theme.muted; font-size: 11px; wrap: word-wrap; }
+                    }
+
+                    Card {
+                        title: "Log";
+                        TextEdit {
+                            text: root.log-text;
+                            read-only: true;
+                            height: 280px;
                             font-size: 11px;
                         }
-                    }
-                    Toggle {
-                        label: "Keep all phones' audio in sync (delays the fastest to match the farthest)";
-                        checked: root.audio-sync;
-                        toggled(v) => { root.audio-sync = v; }
-                    }
-                    HorizontalLayout {
-                        spacing: 10px;
-                        Button { text: "Apply"; enabled: root.daemon-connected; clicked => { root.apply-settings(); } }
-                        Button { text: "Sync audio now"; enabled: root.daemon-connected; clicked => { root.sync-audio-now(); } }
-                        Text { text: root.settings-status; color: #a6adc8; vertical-alignment: center; font-size: 12px; }
-                    }
-                }
-
-                Section {
-                    title: "General";
-                    Toggle {
-                        label: "Start DisplaySwarm when I log in";
-                        checked: root.start-on-login;
-                        toggled(v) => { root.set-start-on-login(v); }
-                    }
-                    Row {
-                        label: "Tray";
-                        Text { text: root.tray-text; color: #cdd6f4; vertical-alignment: center; font-size: 12px; wrap: word-wrap; }
-                    }
-                }
-
-                Section {
-                    title: "Wi-Fi";
-                    Text { text: root.wifi-status; color: #cdd6f4; font-size: 12px; }
-                    Text { text: root.wifi-detail; color: #7f849c; font-size: 12px; wrap: word-wrap; }
-                    // Pairing (QR / PIN) and trusted devices go here; see daemon/wifi.rs.
-                    HorizontalLayout {
-                        spacing: 8px;
-                        Button { text: "Pair a phone (PIN)"; clicked => { root.start-pairing(); } }
-                        Button {
-                            visible: root.wifi-firewall != "";
-                            text: "Open firewall port (" + root.wifi-firewall + ")";
-                            clicked => { root.open-firewall(); }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Button { text: "Refresh log"; clicked => { root.refresh-logs(); } }
+                            Button { text: "Copy debug report"; clicked => { root.copy-report(); } }
+                            Text {
+                                text: root.report-status;
+                                color: Theme.muted;
+                                font-size: 12px;
+                                vertical-alignment: center;
+                                wrap: word-wrap;
+                                horizontal-stretch: 1;
+                            }
                         }
-                        Button { text: "Refresh"; clicked => { root.refresh-wifi(); } }
-                    }
-                }
-            }
-        }
-
-        // ---- Diagnostics
-        if root.tab == 2: ScrollView {
-            VerticalLayout {
-                spacing: 10px;
-                padding-right: 6px;
-
-                Section {
-                    title: "Checks";
-                    Row {
-                        label: "Desktop backend";
-                        Text { text: root.backend-text; color: #cdd6f4; vertical-alignment: center; font-size: 12px; }
-                    }
-                    for d in root.diagnostics: HorizontalLayout {
-                        spacing: 8px;
-                        Rectangle {
-                            width: 10px;
-                            height: 10px;
-                            y: 4px;
-                            border-radius: 5px;
-                            background: d.status == 0 ? #a6e3a1 : d.status == 1 ? #f9e2af : #f38ba8;
-                        }
-                        Text { text: d.name; color: #cdd6f4; font-size: 12px; width: 190px; }
-                        Text { text: d.detail; color: #a6adc8; font-size: 12px; wrap: word-wrap; horizontal-stretch: 1; }
-                    }
-                    HorizontalLayout {
-                        spacing: 8px;
-                        Button { text: "Re-run checks"; clicked => { root.refresh-diagnostics(); } }
-                        Button { text: "Set up virtual display"; clicked => { root.setup-display(); } }
-                    }
-                    Text { text: root.display-status-text; color: #7f849c; font-size: 11px; wrap: word-wrap; }
-                }
-
-                Section {
-                    title: "Log";
-                    TextEdit {
-                        text: root.log-text;
-                        read-only: true;
-                        height: 260px;
-                        font-size: 11px;
-                    }
-                    HorizontalLayout {
-                        spacing: 8px;
-                        Button { text: "Refresh log"; clicked => { root.refresh-logs(); } }
-                        Button { text: "Copy debug report"; clicked => { root.copy-report(); } }
-                        Text { text: root.report-status; color: #a6adc8; vertical-alignment: center; font-size: 12px; wrap: word-wrap; }
                     }
                 }
             }
