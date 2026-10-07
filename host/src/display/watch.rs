@@ -513,7 +513,9 @@ mod tests {
         assert!(ownership_for("gnome", "d", None).is_none());
         assert!(ownership_for("gnome", "d", Some(&Layout::default())).is_some());
         assert!(ownership_for("none", "d", None).is_none());
-        assert!(ownership_for("x11", "d", None).is_some() && !needs_baseline("x11"));
+        assert!(!needs_baseline("x11"));
+        // The X11 backend exists only on Linux.
+        assert_eq!(ownership_for("x11", "d", None).is_some(), cfg!(target_os = "linux"));
     }
 
     #[test]

@@ -84,7 +84,14 @@ fn default_encoder_emits_config_key_delta_in_order() {
         assert!(!pk.is_empty(), "{}: no output for a frame (added latency)", enc.backend_name());
         for p in &pk {
             assert_eq!(p.timestamp_us, f.timestamp_us);
-            assert_eq!(&p.data[..4], &[0, 0, 0, 1], "Annex-B start code");
+            // x264 writes a 3-byte start code before the SEI that opens a keyframe;
+            // both lengths are valid Annex-B and the phone accepts either.
+            assert!(
+                p.data.starts_with(&[0, 0, 0, 1]) || p.data.starts_with(&[0, 0, 1]),
+                "{}: no Annex-B start code: {:?}",
+                enc.backend_name(),
+                &p.data[..p.data.len().min(4)]
+            );
         }
         all.push(pk);
     }
