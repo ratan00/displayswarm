@@ -48,9 +48,11 @@ Then start DisplaySwarm on the PC, open the app on the phone and connect by USB 
 
 ## Screenshots
 
-The host window on the PC, with a tablet connected over USB and extending the desktop:
+The host window on the PC: connected devices on the left, the selected device's role, live stats and settings on the right. It follows the desktop's light or dark theme.
 
-![DisplaySwarm host window on KDE Plasma](docs/screenshots/host.png)
+![DisplaySwarm host window, light theme](docs/screenshots/host.png)
+
+![DisplaySwarm host window, dark theme](docs/screenshots/host-dark.png)
 
 The Android app, choosing what the device does (mirror, extend, mirror one window, drawing tablet, input pad):
 
