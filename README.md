@@ -1,6 +1,6 @@
 # DisplaySwarm
 
-Use your Android phone or tablet as a second monitor/speaker for your Linux PC, over USB or Wi-Fi. Several devices can be connected at once.
+Use your Android phones or tablets as a second monitor/speaker for your Linux PC, over USB or Wi-Fi. Several devices can be connected at once.
 
 [![Download AppImage](https://img.shields.io/badge/Download-AppImage-2ea44f?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/ratan00/displayswarm/releases/latest)
 [![Download APK](https://img.shields.io/badge/Download-Android%20APK-3ddc84?style=for-the-badge&logo=android&logoColor=white)](https://github.com/ratan00/displayswarm/releases/latest)
