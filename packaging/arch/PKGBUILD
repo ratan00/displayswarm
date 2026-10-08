@@ -2,7 +2,7 @@
 # Builds from the checkout this file lives in (packaging/arch/ inside the repo):
 #   cd packaging/arch && makepkg -f
 pkgname=displayswarm
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc='Use an Android phone as a second display and input device'
 arch=('x86_64')

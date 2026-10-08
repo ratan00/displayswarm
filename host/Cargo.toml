@@ -1,6 +1,6 @@
 [package]
 name = "displayswarm-host"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["DisplaySwarm Team"]
 description = "Cross-platform virtual display host engine for Android"
