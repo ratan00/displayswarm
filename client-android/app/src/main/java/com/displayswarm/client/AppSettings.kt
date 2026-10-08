@@ -239,7 +239,7 @@ class AppSettings(private val store: SettingsStore) {
 
     /** Touchpad cursor speed multiplier, 0.5..2.5. */
     var pointerSpeed: Float
-        get() = store.getFloat(KEY_POINTER_SPEED, 1f).coerceIn(0.5f, 2.5f)
+        get() = store.getFloat(KEY_POINTER_SPEED, 1.5f).coerceIn(0.5f, 2.5f)
         set(v) = set(KEY_POINTER_SPEED, v.coerceIn(0.5f, 2.5f))
 
     var macros: List<Macro>

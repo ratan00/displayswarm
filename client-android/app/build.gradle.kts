@@ -15,8 +15,23 @@ android {
         versionName = "0.2.0"
     }
 
+    // Release signing comes from the environment so no secret is in the repo:
+    // DS_KEYSTORE, DS_STORE_PASSWORD, DS_KEY_ALIAS, DS_KEY_PASSWORD. Unset = unsigned.
+    val dsKeystore = System.getenv("DS_KEYSTORE")
+    signingConfigs {
+        if (dsKeystore != null) {
+            create("release") {
+                storeFile = file(dsKeystore)
+                storePassword = System.getenv("DS_STORE_PASSWORD")
+                keyAlias = System.getenv("DS_KEY_ALIAS")
+                keyPassword = System.getenv("DS_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (dsKeystore != null) signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

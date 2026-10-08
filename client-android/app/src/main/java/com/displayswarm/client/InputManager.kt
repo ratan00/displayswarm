@@ -190,12 +190,15 @@ class InputOverlayView @JvmOverloads constructor(
      * the host cannot tell the difference and there is only one code path to
      * keep correct.
      *
-     * Composing text is deliberately ignored rather than forwarded: this view
-     * displays no pre-edit text, and forwarding both the composing updates and
-     * the final commit would report every character twice.
+     * Composing text is typed on the host as it changes and corrected with
+     * Backspace when the IME replaces it, so autocorrect works.
      */
-    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection =
-        KeyEventInputConnection(this)
+    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
+        // Without a text input type the IME turns suggestions and autocorrect off.
+        outAttrs.inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_AUTO_CORRECT
+        outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or EditorInfo.IME_FLAG_NO_EXTRACT_UI
+        return KeyEventInputConnection(this)
+    }
 
     /**
      * The single entry point for keyboard capture.
@@ -281,16 +284,41 @@ private class KeyEventInputConnection(
     private val view: InputOverlayView
 ) : BaseInputConnection(view, /* fullEditor = */ true) {
 
-    override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
-        val chars = text?.toString().orEmpty()
-        if (chars.isEmpty()) return true
-        val events = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD)
-            .getEvents(chars.toCharArray())
-            ?: return false
-        val sink = view.onKeyEvent
-        if (sink != null) {
-            for (event in events) sink(event)
+    /**
+     * The word the IME is composing, as already typed on the host. Composing
+     * text is sent as it changes (and corrected with Backspace when the IME
+     * replaces it, which is what autocorrect and suggestions do), so the host
+     * always shows what the IME believes is on screen.
+     */
+    private var composing = ""
+
+    private fun typeChars(chars: String) {
+        if (chars.isEmpty()) return
+        val events = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD).getEvents(chars.toCharArray()) ?: return
+        val sink = view.onKeyEvent ?: return
+        for (event in events) sink(event)
+    }
+
+    private fun backspace(count: Int) {
+        val sink = view.onKeyEvent ?: return
+        val now = android.os.SystemClock.uptimeMillis()
+        repeat(count) {
+            sink(KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL, 0))
+            sink(KeyEvent(now, now, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_DEL, 0))
         }
+    }
+
+    /** Makes the host show [text] where it showed the composing word. */
+    private fun replaceComposing(text: String) {
+        val edit = textEdit(composing, text)
+        backspace(edit.backspaces)
+        typeChars(edit.typed)
+        composing = text
+    }
+
+    override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
+        replaceComposing(text?.toString().orEmpty())
+        composing = "" // committed: no longer replaceable
         return true
     }
 
@@ -298,6 +326,13 @@ private class KeyEventInputConnection(
         // The IME only knows how to delete "characters"; on a host keyboard that
         // is a Backspace or Forward-Delete key. `beforeLength` is the text the
         // IME believes it inserted, so deleting backwards means Backspace.
+        if (afterLength <= 0 && composing.isNotEmpty()) {
+            // Deleting into the composing word: it shrinks, and Backspace is sent once per character.
+            val n = minOf(beforeLength.coerceAtLeast(1), composing.length)
+            composing = composing.dropLast(n)
+            backspace(n)
+            return true
+        }
         val keyCode =
             if (afterLength <= 0) KeyEvent.KEYCODE_DEL else KeyEvent.KEYCODE_FORWARD_DEL
         val sink = view.onKeyEvent ?: return true
@@ -323,12 +358,15 @@ private class KeyEventInputConnection(
         return true
     }
 
-    // Composing text is intentionally ignored: this view renders nothing, and
-    // forwarding composing updates *and* the final commit would report each
-    // character twice.
-    override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean = true
+    override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
+        replaceComposing(text?.toString().orEmpty())
+        return true
+    }
     override fun setComposingRegion(start: Int, end: Int): Boolean = true
-    override fun finishComposingText(): Boolean = true
+    override fun finishComposingText(): Boolean {
+        composing = "" // what was typed stays
+        return true
+    }
 }
 
 /**
@@ -731,7 +769,7 @@ class InputManager(
                     ageUs = ageUs,
                     x = viewport.toContentX(axis(MotionEvent.AXIS_X)),
                     y = viewport.toContentY(axis(MotionEvent.AXIS_Y)),
-                    pressure = axis(MotionEvent.AXIS_PRESSURE).coerceIn(0.0f, 1.0f),
+                    pressure = penPressureCurve(axis(MotionEvent.AXIS_PRESSURE)),
                     tiltX = tiltX.toFloat(),
                     tiltY = tiltY.toFloat()
                 )
@@ -944,4 +982,27 @@ class InputManager(
         if (code == 0 || code == CHARACTER_UNDEFINED) return ""
         return code.toChar().toString()
     }
+}
+
+/**
+ * Pen pressure as sent to the host. Many pens report light strokes as a small
+ * fraction of the range, which drawing apps then read as a faint, thin line. A
+ * gentle curve (exponent 0.6) lifts the low end and keeps 0 and 1 where they are.
+ */
+internal fun penPressureCurve(raw: Float): Float {
+    val p = if (raw.isNaN()) 0f else raw.coerceIn(0.0f, 1.0f)
+    return Math.pow(p.toDouble(), 0.6).toFloat()
+}
+
+/**
+ * What to do to the host's text so that it shows [new] where it showed [old]:
+ * press Backspace [backspaces] times, then type [typed].
+ */
+internal data class TextEdit(val backspaces: Int, val typed: String)
+
+internal fun textEdit(old: String, new: String): TextEdit {
+    var common = 0
+    val max = minOf(old.length, new.length)
+    while (common < max && old[common] == new[common]) common++
+    return TextEdit(old.length - common, new.substring(common))
 }

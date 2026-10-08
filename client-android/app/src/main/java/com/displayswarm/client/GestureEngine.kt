@@ -44,7 +44,7 @@ class GestureEngine(
         val dragRadius: Float = 80f,
         /** Cursor gain at low speed, and how much it grows with speed (px/ms). */
         val pointerGain: Float = 1.0f,
-        val pointerAccel: Float = 0.35f,
+        val pointerAccel: Float = 0.5f,
         val pointerMaxBoost: Float = 4f,
         /** Finger travel that makes one wheel detent. */
         val pxPerDetent: Float = 30f,

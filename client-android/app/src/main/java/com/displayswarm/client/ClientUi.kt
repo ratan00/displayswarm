@@ -374,10 +374,9 @@ fun Toolbar(state: ClientUiState, actions: ClientActions, modifier: Modifier = M
 // ---- Shortcut bar -----------------------------------------------------------
 
 internal val SHORTCUT_KEYS = listOf(
-    "Esc" to "esc", "Tab" to "tab", "Del" to "delete", "Copy" to "ctrl+c", "Paste" to "ctrl+v",
-    "Cut" to "ctrl+x", "Undo" to "ctrl+z", "Redo" to "ctrl+shift+z", "Save" to "ctrl+s",
-    "All" to "ctrl+a", "Alt+Tab" to "alt+tab", "Super" to "super", "←" to "left", "→" to "right",
-    "↑" to "up", "↓" to "down"
+    "Esc" to "esc", "Enter" to "enter", "Tab" to "tab", "Del" to "delete", "Copy" to "ctrl+c", "Paste" to "ctrl+v",
+    "Cut" to "ctrl+x", "Undo" to "ctrl+z", "Redo" to "ctrl+shift+z", "Alt+Tab" to "alt+tab", "Super" to "super",
+    "F1" to "f1", "F2" to "f2", "F3" to "f3", "F4" to "f4", "F5" to "f5"
 )
 
 // ---- Macro pad --------------------------------------------------------------
