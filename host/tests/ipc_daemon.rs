@@ -25,7 +25,7 @@ async fn next_event(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Event>, want: 
     .expect("timed out waiting for an event")
 }
 
-fn options(transport: Arc<UnixTransport>, manager: Arc<SessionManager>, logs: LogBuffer) -> DaemonOptions {
+fn options(transport: Arc<dyn IpcTransport>, manager: Arc<SessionManager>, logs: LogBuffer) -> DaemonOptions {
     DaemonOptions { transport, tray: false, start_server: Some(false), manager: Some(manager), logs }
 }
 
@@ -37,7 +37,7 @@ async fn client_drives_the_daemon() {
     let manager = SessionManager::new(store, Backends::default());
     let logs = LogBuffer::new();
     logs.push("a log line".into());
-    let transport = Arc::new(UnixTransport::new(&path));
+    let transport = transport_at(&path);
     let daemon = daemon::start(options(transport.clone(), manager, logs)).await.expect("daemon starts");
 
     // A second daemon on the same socket is refused.
@@ -82,7 +82,7 @@ async fn client_drives_the_daemon() {
 async fn garbage_lines_do_not_kill_the_connection() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let path = temp_socket("garbage");
-    let transport = Arc::new(UnixTransport::new(&path));
+    let transport = transport_at(&path);
     let manager = SessionManager::new(DeviceStore::in_memory(), Backends::default());
     let daemon = daemon::start(options(transport.clone(), manager, LogBuffer::new())).await.unwrap();
 

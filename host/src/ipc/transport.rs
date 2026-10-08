@@ -174,6 +174,9 @@ mod windows_pipe {
     use super::*;
     use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
 
+    /// `ERROR_PIPE_BUSY`: the pipe exists but no instance is free to connect to.
+    const ERROR_PIPE_BUSY: i32 = 231;
+
     /// A named pipe for the user, local clients only.
     ///
     /// UNVERIFIED on Windows: the pipe gets the default security descriptor
@@ -213,7 +216,9 @@ mod windows_pipe {
         fn bind(&self) -> BoxFuture<'_, io::Result<Box<dyn IpcListener>>> {
             Box::pin(async move {
                 // A live daemon answers; `first_pipe_instance` also refuses a second server.
-                if ClientOptions::new().open(&self.name).is_ok() {
+                // Busy: every instance is mid-accept, which also means a daemon is there.
+                let probe = ClientOptions::new().open(&self.name);
+                if probe.is_ok() || probe.err().and_then(|e| e.raw_os_error()) == Some(ERROR_PIPE_BUSY) {
                     return Err(io::Error::new(
                         io::ErrorKind::AddrInUse,
                         format!("another daemon is already listening on {}", self.name),
@@ -229,7 +234,20 @@ mod windows_pipe {
         }
 
         fn connect(&self) -> BoxFuture<'_, io::Result<BoxedStream>> {
-            Box::pin(async move { Ok(Box::new(ClientOptions::new().open(&self.name)?) as BoxedStream) })
+            Box::pin(async move {
+                // Between accepting one client and creating the next instance the
+                // pipe is busy; that window is short, so wait it out.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                loop {
+                    match ClientOptions::new().open(&self.name) {
+                        Ok(c) => return Ok(Box::new(c) as BoxedStream),
+                        Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && std::time::Instant::now() < deadline => {
+                            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+            })
         }
 
         fn cleanup(&self) {}

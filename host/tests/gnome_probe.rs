@@ -1,3 +1,6 @@
+// Linux only: the portal capturer does not exist elsewhere.
+#![cfg(target_os = "linux")]
+
 use std::time::{Duration, Instant};
 use displayswarm_host::capture::portal;
 use displayswarm_host::capture::linux::NativePortalCapturer;

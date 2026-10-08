@@ -184,8 +184,15 @@ fn render_devices(ui: &MainWindow) {
             .iter()
             .map(|d| to_row(d, s.history.get(&d.device_id), s.flashing.as_deref() == Some(d.device_id.as_str())))
             .collect();
-        let pending = s.devices.iter().find(|d| d.connected && d.role.is_none());
-        ui.set_pending_device_name(pending.map(|d| d.display_name()).unwrap_or("").into());
+        let pending = s.devices.iter().position(|d| d.connected && d.role.is_none());
+        let pending_name: SharedString = pending.map(|i| s.devices[i].display_name()).unwrap_or("").into();
+        // A device that just arrived without a role is shown, so its role picker is in view.
+        if let Some(i) = pending {
+            if ui.get_pending_device_name() != pending_name {
+                ui.set_selected_device(i as i32);
+            }
+        }
+        ui.set_pending_device_name(pending_name);
 
         let model = s.model.clone().expect("model is created at startup");
         let same_shape = model.row_count() == rows.len()
@@ -237,6 +244,19 @@ fn apply_state(ui: &MainWindow, st: &StateInfo, full: bool) {
     // every state push.
     if STATE.with(|s| s.borrow().roles != st.roles) {
         ui.set_role_names(ModelRc::new(VecModel::from(role_labels(&st.roles))));
+        let info = |r: Role| st.roles.iter().find(|i| i.role == role_key(r));
+        let available: Vec<bool> = Role::ALL.iter().map(|r| info(*r).map_or(true, |i| i.available)).collect();
+        let reasons: Vec<SharedString> = Role::ALL
+            .iter()
+            .map(|r| match info(*r) {
+                Some(i) if !i.available => {
+                    i.reason.clone().unwrap_or_else(|| "Not available on this desktop".into()).into()
+                }
+                _ => SharedString::new(),
+            })
+            .collect();
+        ui.set_role_available(ModelRc::new(VecModel::from(available)));
+        ui.set_role_reasons(ModelRc::new(VecModel::from(reasons)));
     }
     ui.set_tray_text(
         match st.tray.as_str() {
