@@ -886,6 +886,9 @@ where
 
     let mut usb_scan_interval = tokio::time::interval(Duration::from_millis(1500));
     usb_scan_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // The probe repeats every 1.5 s, so a standing failure is reported at most
+    // once a minute.
+    let mut last_usb_warn: Option<std::time::Instant> = None;
 
     // Every session is tracked here so that stopping the server can wait for
     // them. Without this, `run_server` returned while sessions (and the capturer
@@ -966,7 +969,24 @@ where
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        log::debug!("USB AOA probe notice: {:?}", e);
+                        let denied = e
+                            .downcast_ref::<nusb::Error>()
+                            .is_some_and(|n| n.kind() == nusb::ErrorKind::PermissionDenied);
+                        if denied {
+                            // Silent before: a phone in accessory mode without USB
+                            // debugging (18d1:2d00) gets no uaccess ACL, so the host
+                            // never opens it and the phone never reaches the app.
+                            if last_usb_warn.is_none_or(|t| t.elapsed() >= Duration::from_secs(60)) {
+                                last_usb_warn = Some(std::time::Instant::now());
+                                log::warn!(
+                                    "USB: permission denied opening the phone. Install the udev rule \
+                                     (packaging/udev/70-displayswarm-aoa.rules -> /etc/udev/rules.d/, then \
+                                     `udevadm control --reload` and replug), or turn on USB debugging."
+                                );
+                            }
+                        } else {
+                            log::debug!("USB AOA probe notice: {:?}", e);
+                        }
                     }
                 }
             }

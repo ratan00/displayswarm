@@ -46,6 +46,20 @@ The Android app checks the Releases page when you open its Settings and tells yo
 
 Then start DisplaySwarm on the PC, open the app on the phone and connect by USB cable or pick the PC in the list over Wi-Fi. On Wi-Fi a firewall may block the phone; the host has an "Open firewall port" button for ufw/firewalld.
 
+### USB permission (udev rule)
+
+The `.pkg.tar.zst` and `.deb` packages install a udev rule that lets your logged-in user open a phone in Android accessory mode (`18d1:2d00`-`2d05`). Without it, USB only works while USB debugging is on, because systemd grants access only to the accessory modes that include an adb interface. With debugging off the host gets "permission denied" and never reaches the app.
+
+The AppImage cannot install it, so create the rule once and replug the phone (this needs no copy of the repo):
+
+```bash
+echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="18d1", ATTR{idProduct}=="2d0[0-5]", TAG+="uaccess"' \
+  | sudo tee /etc/udev/rules.d/70-displayswarm-aoa.rules
+sudo udevadm control --reload
+```
+
+The rule only grants access to the logged-in user while the phone is plugged in, and does not affect the phone's normal (MTP) mode. If USB still does not connect, the host log (`journalctl --user -u displayswarm-hostd`) says "permission denied opening the phone".
+
 ## Screenshots
 
 The host window on the PC: connected devices on the left, the selected device's role, live stats and settings on the right. It follows the desktop's light or dark theme.

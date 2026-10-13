@@ -12,6 +12,7 @@ trap 'rm -rf "$stage"' EXIT
 
 install -Dm755 "$rel/displayswarm" "$rel/displayswarm-hostd" -t "$stage/usr/bin/"
 install -Dm644 "$here/../displayswarm-hostd.service" -t "$stage/usr/lib/systemd/user/"
+install -Dm644 "$here/../udev/70-displayswarm-aoa.rules" -t "$stage/usr/lib/udev/rules.d/"
 install -Dm644 "$here/../displayswarm.desktop" -t "$stage/usr/share/applications/"
 install -Dm644 "$root/NOTICE" "$stage/usr/share/doc/displayswarm/NOTICE"
 

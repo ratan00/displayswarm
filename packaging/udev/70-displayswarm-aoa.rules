@@ -1,0 +1,5 @@
+# DisplaySwarm: let the logged-in user open a phone that is in Android Open
+# Accessory mode (18d1:2d00..2d05). Without this only 2d01/2d03/2d05 (the ones
+# that carry an adb interface) get a uaccess ACL, so a phone with USB debugging
+# off sits in accessory mode and the host cannot open it (EACCES).
+SUBSYSTEM=="usb", ATTR{idVendor}=="18d1", ATTR{idProduct}=="2d0[0-5]", TAG+="uaccess"
