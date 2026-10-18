@@ -150,6 +150,13 @@ class NetworkClient(
             } catch (e: ProtocolException) {
                 Log.w(TAG, "Protocol error: ${e.message}")
                 endStatus = endStatus ?: "Disconnected (protocol error: ${e.message})"
+            } catch (e: java.net.NoRouteToHostException) {
+                if (isRunning.get()) {
+                    Log.e(TAG, "No route to $host: ${e.message}")
+                    // Typical after this device rejoined a phone hotspot: the hotspot
+                    // still holds stale state for the host's Wi-Fi session.
+                    endStatus = endStatus ?: "Can't reach $host (no route). Reconnect the computer's Wi-Fi, or use USB"
+                }
             } catch (e: Exception) {
                 if (isRunning.get()) {
                     Log.e(TAG, "Connection error: ${e.message}")
