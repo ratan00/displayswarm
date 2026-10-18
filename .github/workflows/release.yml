@@ -74,8 +74,21 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: '17' }
-      - run: cd client-android && ./gradlew assembleDebug
-      - run: cp client-android/app/build/outputs/apk/debug/app-debug.apk DisplaySwarm-${GITHUB_REF_NAME#v}.apk
+      # An optimised release build signed with the one project key. The debug
+      # build used before ran debuggable and unoptimised, and CI's throwaway debug
+      # key changed every run, so no update could install over the last one.
+      - name: Build signed release APK
+        env:
+          DS_KEYSTORE_BASE64: ${{ secrets.DS_KEYSTORE_BASE64 }}
+          DS_STORE_PASSWORD: ${{ secrets.DS_STORE_PASSWORD }}
+          DS_KEY_ALIAS: ${{ secrets.DS_KEY_ALIAS }}
+          DS_KEY_PASSWORD: ${{ secrets.DS_KEY_PASSWORD }}
+        run: |
+          test -n "$DS_KEYSTORE_BASE64" || { echo "::error::DS_KEYSTORE_BASE64 secret is not set"; exit 1; }
+          export DS_KEYSTORE="$RUNNER_TEMP/release.jks"
+          echo "$DS_KEYSTORE_BASE64" | base64 -d > "$DS_KEYSTORE"
+          cd client-android && ./gradlew assembleRelease
+      - run: cp client-android/app/build/outputs/apk/release/app-release.apk DisplaySwarm-${GITHUB_REF_NAME#v}.apk
       - uses: actions/upload-artifact@v4
         with: { name: apk, path: '*.apk' }
 

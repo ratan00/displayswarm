@@ -70,9 +70,19 @@ class AudioLogicTest {
 
     @Test
     fun excessIsDroppedDownToTarget() {
-        val c = JitterController(initialTargetMs = 30, maxMs = 100)
+        val c = JitterController(initialTargetMs = 30, headroomMs = 70)
         assertEquals(0, c.excessMs(100))
         assertEquals(80, c.excessMs(110))
+    }
+
+    @Test
+    fun headroomFollowsARaisedTarget() {
+        // A Wi-Fi stall's burst of late packets is kept, not dropped, once the target has grown.
+        val c = JitterController(initialTargetMs = 30)
+        repeat(5) { c.onUnderrun(10) }
+        assertEquals(80, c.targetMs)
+        assertEquals(0, c.excessMs(150))
+        assertEquals(90, c.excessMs(170))
     }
 
     @Test

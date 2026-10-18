@@ -77,6 +77,11 @@ impl Role {
         !matches!(self, Role::Tablet | Role::InputPad | Role::SoundOnly)
     }
 
+    /// Whether the phone's touches, pen and keys reach the desktop in this role.
+    pub fn takes_input(self) -> bool {
+        self != Role::SoundOnly
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Role::Mirror => "Mirror",

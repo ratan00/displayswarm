@@ -125,6 +125,10 @@ fn run(
             *pw::keys::NODE_DESCRIPTION => description,
             *pw::keys::APP_NAME => "DisplaySwarm",
             "stream.capture.sink" => "true",
+            // Passive: the tap follows the output instead of keeping it running.
+            // Without it the laptop's sound card never suspended while a phone
+            // was connected, and the tap woke ~190 times a second for silence.
+            "node.passive" => "true",
             "audio.position" => "FL,FR",
             // A quarter of the default 1024-frame period: the tap is the first link of the phone's delay.
             "node.latency" => "256/48000",

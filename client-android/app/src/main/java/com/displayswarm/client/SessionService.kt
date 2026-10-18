@@ -28,6 +28,7 @@ class SessionService : Service() {
     private var lastText = "Connected to the host"
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+    private var lowLatencyLock: WifiManager.WifiLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -119,13 +120,26 @@ class SessionService : Service() {
                     acquire()
                 }
         }
+        // Android 10+: low-latency mode switches Wi-Fi power save off (and defers
+        // scans) while the app is in front. With power save on, the access point
+        // holds downstream packets between beacons and audio arrives in bursts;
+        // HIGH_PERF alone no longer does this on current Android.
+        if (lowLatencyLock == null && android.os.Build.VERSION.SDK_INT >= 29) {
+            lowLatencyLock = (applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager)
+                .createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "displayswarm:low-latency").apply {
+                    setReferenceCounted(false)
+                    acquire()
+                }
+        }
     }
 
     private fun releaseLocks() {
         try { wakeLock?.takeIf { it.isHeld }?.release() } catch (_: Exception) {}
         try { wifiLock?.takeIf { it.isHeld }?.release() } catch (_: Exception) {}
+        try { lowLatencyLock?.takeIf { it.isHeld }?.release() } catch (_: Exception) {}
         wakeLock = null
         wifiLock = null
+        lowLatencyLock = null
     }
 
     companion object {

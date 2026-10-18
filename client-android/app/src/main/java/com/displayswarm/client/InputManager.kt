@@ -450,8 +450,18 @@ class InputManager(
     private var zoomPrevCy = 0f
     private var zoomPrevDist = 1f
 
+    /**
+     * False in roles that take no input (Sound only): touches, pen, mouse and
+     * keys stay on the phone. Local gestures (three-finger tap for the toolbar)
+     * still work, and control messages still go out.
+     */
+    var inputEnabled = true
+
     /** Sends one message through the single transport path. */
-    fun send(msg: Wire.Message) = onPacketReady(msg.encode())
+    fun send(msg: Wire.Message) {
+        if (!inputEnabled && msg.channel == Wire.CH_INPUT) return
+        onPacketReady(msg.encode())
+    }
 
     fun setTouchpadConfig(pointerSpeed: Float, natural: Boolean, density: Float) {
         gestures.config = GestureEngine.Config.forDensity(density).copy(
@@ -705,7 +715,7 @@ class InputManager(
         if (points.isEmpty()) return false
         val actionId = if (isStylus(event.getToolType(actionIndex))) points[0].id else event.getPointerId(actionIndex)
         val out = palmFilter.filterTouch(Wire.Message.Touch(touchAction, actionId, points), event.eventTime)
-        out.forEach { onPacketReady(it.encode()) }
+        out.forEach { send(it) }
         return out.isNotEmpty()
     }
 
@@ -777,7 +787,7 @@ class InputManager(
         }
         val inRange = penAction != Wire.ACTION_UP && penAction != Wire.ACTION_CANCEL && penAction != Wire.ACTION_HOVER_EXIT
         palmFilter.onPen(inRange, event.eventTime)
-        onPacketReady(Wire.Message.Pen(penAction, mapped.tool, buttons, samples).encode())
+        send(Wire.Message.Pen(penAction, mapped.tool, buttons, samples))
         return true
     }
 
@@ -832,14 +842,14 @@ class InputManager(
         if ((event.buttonState and MotionEvent.BUTTON_PRIMARY) != 0) buttons = buttons or Wire.MOUSE_BUTTON_PRIMARY
         if ((event.buttonState and MotionEvent.BUTTON_SECONDARY) != 0) buttons = buttons or Wire.MOUSE_BUTTON_SECONDARY
         if ((event.buttonState and MotionEvent.BUTTON_TERTIARY) != 0) buttons = buttons or Wire.MOUSE_BUTTON_TERTIARY
-        onPacketReady(
+        send(
             Wire.Message.Mouse(
                 action = action,
                 buttons = buttons,
                 relative = false,
                 x = viewport.toContentX(event.getX(idx)),
                 y = viewport.toContentY(event.getY(idx))
-            ).encode()
+            )
         )
         return true
     }
@@ -888,14 +898,14 @@ class InputManager(
         val hScroll = event.getAxisValue(MotionEvent.AXIS_HSCROLL)
         if (vScroll == 0f && hScroll == 0f) return false
 
-        onPacketReady(
+        send(
             Wire.Message.Scroll(
                 phase = Wire.PHASE_NONE,
                 x = viewport.toContentX(event.getX(0)),
                 y = viewport.toContentY(event.getY(0)),
                 dx = hScroll,
                 dy = vScroll
-            ).encode()
+            )
         )
         return true
     }
@@ -928,7 +938,7 @@ class InputManager(
             stickyMeta = 0
             onStickyConsumed?.invoke()
         }
-        onPacketReady(
+        send(
             Wire.Message.Key(
                 action = action,
                 keyCode = event.keyCode,
@@ -938,7 +948,7 @@ class InputManager(
                 // the key code, and repeating the character there would make the
                 // host type two of everything.
                 text = if (action == Wire.ACTION_DOWN) unicodeTextOf(event) else ""
-            ).encode()
+            )
         )
     }
 

@@ -6,8 +6,10 @@ use crate::protocol::{FRAME_TYPE_CONFIG, FRAME_TYPE_DELTA, FRAME_TYPE_KEY};
 
 /// Safety IDR period. A long GOP keeps bitrate low on a mostly static desktop,
 /// but a periodic IDR lets a client that lost data (or joined late) resync
-/// without waiting for an explicit request.
-pub const SAFETY_IDR_INTERVAL_US: u64 = 3_000_000;
+/// without waiting for an explicit request. The transports are reliable and
+/// the phone asks for a keyframe whenever its decoder needs one, so this is a
+/// last resort: at 3 s every keyframe burst stalled audio on a weak Wi-Fi link.
+pub const SAFETY_IDR_INTERVAL_US: u64 = 10_000_000;
 
 /// VBV buffer size in frames of bitrate (`bitrate / fps * VBV_FRAMES`). One frame
 /// gives the lowest latency but starves the IDR (a text-heavy IDR needs several

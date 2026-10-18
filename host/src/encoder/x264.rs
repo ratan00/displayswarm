@@ -261,7 +261,7 @@ mod tests {
     fn safety_idr_after_interval_even_when_idle() {
         let mut enc = X264Encoder::try_new(320, 192, 30, 2000).unwrap();
         enc.encode(&frame(320, 192, 0, 10)).unwrap();
-        let p = enc.encode(&frame(320, 192, 5_000_000, 10)).unwrap();
+        let p = enc.encode(&frame(320, 192, crate::encoder::stream::SAFETY_IDR_INTERVAL_US + 1, 10)).unwrap();
         assert_eq!(p[1].frame_type, FRAME_TYPE_KEY);
     }
 

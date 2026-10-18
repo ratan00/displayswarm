@@ -3,6 +3,7 @@ target/
 **/build/
 .gradle/
 .kotlin/
+.cxx/
 
 # --- local / generated config ---
 local.properties

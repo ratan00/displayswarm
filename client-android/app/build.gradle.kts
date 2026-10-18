@@ -13,6 +13,17 @@ android {
         targetSdk = 34
         versionCode = 3
         versionName = "0.3.0"
+        ndk {
+            // Phones (64- and 32-bit ARM) and the x86_64 emulator.
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+        }
+    }
+    ndkVersion = "27.0.12077973"
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     // Release signing comes from the environment so no secret is in the repo:
@@ -32,7 +43,11 @@ android {
     buildTypes {
         release {
             if (dsKeystore != null) signingConfig = signingConfigs.getByName("release")
-            isMinifyEnabled = false
+            // R8: the debug build users were given ran debuggable and unoptimised
+            // (~75% of a core for audio alone), and material-icons-extended alone
+            // is most of an 18 MB APK; shrinking keeps only the icons in use.
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

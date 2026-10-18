@@ -108,6 +108,12 @@ pub const MSG_AUDIO_SYNC: u8 = 0x0F;
 /// Phone -> host: which optional services the user has switched on
 /// (`SERVICE_*` bits). Sent after the handshake and on every change.
 pub const MSG_SERVICE_STATE: u8 = 0x10;
+/// Host -> phone, network sessions only: audio is also offered over UDP on
+/// `port`, sealed with `key` (AES-256-GCM); see `transport::audio_udp`.
+pub const MSG_AUDIO_UDP: u8 = 0x11;
+/// Phone -> host: the phone's UDP port for that path. The host then sends to
+/// it first, so a stateful firewall on the host lets the phone's probes in.
+pub const MSG_AUDIO_UDP_ANSWER: u8 = 0x12;
 
 /// `ServiceState::enabled` bits.
 pub const SERVICE_AUDIO_OUT: u8 = 1;
@@ -158,7 +164,7 @@ pub const PAIR_DISABLED: u8 = 5;
 /// The channel a known message type travels on, or `None` for an unknown type.
 pub fn channel_of(msg_type: u8) -> Option<u8> {
     Some(match msg_type {
-        0x01..=0x10 | MSG_BATTERY_STATUS | MSG_PAIR_REQUEST | MSG_PAIR_RESPONSE => CH_CONTROL,
+        0x01..=0x12 | MSG_BATTERY_STATUS | MSG_PAIR_REQUEST | MSG_PAIR_RESPONSE => CH_CONTROL,
         MSG_VIDEO_FRAME => CH_VIDEO,
         MSG_AUDIO_FRAME | MSG_MIC_FRAME => CH_AUDIO,
         0x40..=0x46 => CH_INPUT,
@@ -186,6 +192,8 @@ pub const FEATURE_CLIPBOARD: u32 = 1 << 5;
 pub const FEATURE_FILES: u32 = 1 << 6;
 /// The phone reports battery and thermal status ([`Message::BatteryStatus`]).
 pub const FEATURE_BATTERY: u32 = 1 << 8;
+/// The phone can take the host's audio over UDP ([`Message::AudioUdpOffer`]).
+pub const FEATURE_AUDIO_UDP: u32 = 1 << 9;
 
 /// `HelloAck::status`.
 pub const HELLO_OK: u8 = 0;
@@ -474,6 +482,10 @@ pub enum Message {
     AudioSync { delay_us: u32 },
     /// Phone -> host: the services the user wants running (`SERVICE_*`).
     ServiceState { enabled: u8 },
+    /// Host -> phone: the UDP audio path's port and session key.
+    AudioUdpOffer { port: u16, key: [u8; 32] },
+    /// Phone -> host: the phone's end of the UDP audio path.
+    AudioUdpAnswer { port: u16 },
     /// Phone -> host (Phase 8).
     BatteryStatus(BatteryStatus),
     /// Phone -> host, first message on a network connection (see `PAIR_MODE_*`).
@@ -521,6 +533,8 @@ impl Message {
             Self::AudioLatency { .. } => MSG_AUDIO_LATENCY,
             Self::AudioSync { .. } => MSG_AUDIO_SYNC,
             Self::ServiceState { .. } => MSG_SERVICE_STATE,
+            Self::AudioUdpOffer { .. } => MSG_AUDIO_UDP,
+            Self::AudioUdpAnswer { .. } => MSG_AUDIO_UDP_ANSWER,
             Self::BatteryStatus(_) => MSG_BATTERY_STATUS,
             Self::PairRequest { .. } => MSG_PAIR_REQUEST,
             Self::PairResponse { .. } => MSG_PAIR_RESPONSE,
@@ -618,6 +632,11 @@ impl Message {
             Self::AudioLatency { latency_us } => w.extend_from_slice(&latency_us.to_be_bytes()),
             Self::AudioSync { delay_us } => w.extend_from_slice(&delay_us.to_be_bytes()),
             Self::ServiceState { enabled } => w.push(*enabled),
+            Self::AudioUdpOffer { port, key } => {
+                w.extend_from_slice(&port.to_be_bytes());
+                w.extend_from_slice(key);
+            }
+            Self::AudioUdpAnswer { port } => w.extend_from_slice(&port.to_be_bytes()),
             Self::BatteryStatus(b) => {
                 w.push(b.percent);
                 w.push(b.charging as u8);
@@ -777,6 +796,8 @@ impl Message {
             MSG_AUDIO_LATENCY => Self::AudioLatency { latency_us: r.u32()? },
             MSG_AUDIO_SYNC => Self::AudioSync { delay_us: r.u32()? },
             MSG_SERVICE_STATE => Self::ServiceState { enabled: r.u8()? },
+            MSG_AUDIO_UDP => Self::AudioUdpOffer { port: r.u16()?, key: r.take(32)?.try_into().unwrap() },
+            MSG_AUDIO_UDP_ANSWER => Self::AudioUdpAnswer { port: r.u16()? },
             MSG_BATTERY_STATUS => Self::BatteryStatus(BatteryStatus {
                 percent: r.u8()?,
                 charging: r.u8()? != 0,

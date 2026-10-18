@@ -66,15 +66,28 @@ pub fn negotiated_features(offered: u32, settings: &DeviceSettings) -> u32 {
 pub struct ServiceOut {
     ctrl: mpsc::UnboundedSender<Message>,
     bulk: mpsc::Sender<Message>,
+    /// Network sessions: audio frames go here while its path is live.
+    audio_udp: Option<std::sync::Arc<crate::transport::audio_udp::AudioUdp>>,
 }
 
 impl ServiceOut {
     pub fn new(ctrl: mpsc::UnboundedSender<Message>, bulk: mpsc::Sender<Message>) -> Self {
-        Self { ctrl, bulk }
+        Self { ctrl, bulk, audio_udp: None }
+    }
+
+    /// Sends audio frames over `udp` whenever its path is live.
+    pub fn with_audio_udp(mut self, udp: Option<std::sync::Arc<crate::transport::audio_udp::AudioUdp>>) -> Self {
+        self.audio_udp = udp;
+        self
     }
 
     /// A small realtime message (audio frames). False once the session is gone.
     pub fn send(&self, msg: Message) -> bool {
+        if let (Message::AudioFrame(p), Some(udp)) = (&msg, &self.audio_udp) {
+            if udp.try_send(p) {
+                return !self.ctrl.is_closed();
+            }
+        }
         self.ctrl.send(msg).is_ok()
     }
 

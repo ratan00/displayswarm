@@ -120,7 +120,8 @@ class NetworkClient(
                     onStatus = onStatusChanged,
                     onMetrics = onMetricsUpdated,
                     onEnded = { status -> endSession(status) },
-                    onRole = onRoleChanged
+                    onRole = onRoleChanged,
+                    udpLink = sock.inetAddress?.let { sock.localAddress to it }
                 )
                 session = sess
                 onSessionChanged(sess)

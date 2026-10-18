@@ -294,6 +294,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback, ClientActions 
         // The input pad is a touchpad by definition; the pen role is always direct.
         val role = ui.role.role
         im.touchMode = if (role == Wire.ROLE_INPUT_PAD) TouchMode.TOUCHPAD else ui.touchMode
+        im.inputEnabled = role != Wire.ROLE_SOUND_ONLY
         im.localZoom = ui.zoomEnabled && im.touchMode == TouchMode.DIRECT
         im.gestures.viewWidth = touchOverlay.width.toFloat().coerceAtLeast(1f)
         im.gestures.viewHeight = touchOverlay.height.toFloat().coerceAtLeast(1f)
@@ -497,6 +498,13 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback, ClientActions 
         if (!ensureDecoderReady()) {
             Log.i(TAG, "Connecting to USB before the video surface exists; decoder will attach later")
         }
+        // USB takes over from Wi-Fi: a network session left running alongside
+        // made the host replace one with the other every few seconds.
+        cancelReconnect()
+        lastTarget = null
+        networkClient?.stop()
+        networkClient = null
+        tcpSession = null
         aoaManager?.setVideoDecoder(videoDecoder)
         aoaManager?.connect(accessory)
     }
@@ -549,7 +557,8 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback, ClientActions 
         reconnectsLeft--
         val r = Runnable {
             reconnectPending = null
-            if (!userDisconnected && networkClient == null && lastTarget != null) connectTcp(target)
+            // Never reconnect over Wi-Fi while the cable carries a session.
+            if (!userDisconnected && networkClient == null && lastTarget != null && aoaManager?.isConnected() != true) connectTcp(target)
         }
         reconnectPending = r
         main.postDelayed(r, RECONNECT_DELAY_MS)
@@ -571,7 +580,9 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback, ClientActions 
             refreshMhz = displayRefreshMhz,
             densityDpi = reportedDensityDpi(),
             codecs = Wire.CODEC_H264 or (if (hasHevcDecoder()) Wire.CODEC_HEVC else 0),
-            features = Wire.FEATURE_TOUCH or Wire.FEATURE_STYLUS or Wire.FEATURE_KEYBOARD or PhoneServices.features(),
+            // FEATURE_AUDIO_UDP: the host only offers it on network sessions.
+            features = Wire.FEATURE_TOUCH or Wire.FEATURE_STYLUS or Wire.FEATURE_KEYBOARD or Wire.FEATURE_AUDIO_UDP or
+                PhoneServices.features(),
             maxTouchPoints = 10,
             deviceId = DeviceIdentity.id(this),
             deviceName = "${Build.MANUFACTURER} ${Build.MODEL}",

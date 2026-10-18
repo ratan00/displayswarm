@@ -56,13 +56,17 @@ class SeqTracker {
  * - an underrun ends playback and re-fills, and raises the target (up to
  *   [MAX_TARGET_MS]) when it looks like jitter rather than the host having
  *   simply gone quiet; a long stretch without underruns lowers it again;
- * - if the queue grows beyond [maxMs] (the phone plays slower than the host
- *   produces), [excessMs] tells how much to drop to get back to the target.
+ * - if the queue grows more than [headroomMs] past the target (the phone plays
+ *   slower than the host produces), [excessMs] tells how much to drop to get
+ *   back to the target. The headroom moves with the target: a fixed ceiling
+ *   (100 ms against an 80 ms target) dropped the burst of late packets every
+ *   Wi-Fi stall delivers, which ran the queue dry again: steady stutter on a
+ *   phone hotspot.
  */
 class JitterController(
     initialTargetMs: Int = 20,
     private val minTargetMs: Int = 10,
-    private val maxMs: Int = 100,
+    private val headroomMs: Int = 80,
 ) {
     var targetMs: Int = initialTargetMs.coerceIn(minTargetMs, MAX_TARGET_MS)
         private set
@@ -95,10 +99,11 @@ class JitterController(
     }
 
     /** Milliseconds of audio to discard from the front of the queue, 0 if none. */
-    fun excessMs(bufferedMs: Int): Int = if (bufferedMs > maxMs) bufferedMs - targetMs else 0
+    fun excessMs(bufferedMs: Int): Int = if (bufferedMs > targetMs + headroomMs) bufferedMs - targetMs else 0
 
     companion object {
-        const val MAX_TARGET_MS = 80
+        /** Room for the stalls of a busy or power-saving Wi-Fi link (a phone hotspot). */
+        const val MAX_TARGET_MS = 160
         const val STEP_MS = 10
         /** No packets for this long: the host is idle, not the network jittery. */
         const val IDLE_MS = 300L

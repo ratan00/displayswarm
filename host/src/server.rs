@@ -376,6 +376,11 @@ impl SessionManager {
         }
     }
 
+    /// Whether `device_id` has a session over USB right now.
+    fn has_usb_session(&self, device_id: &str) -> bool {
+        self.lock_sessions().get(device_id).is_some_and(|e| e.via_aoa)
+    }
+
     fn lock_sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, SessionEntry>> {
         self.sessions.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -910,6 +915,12 @@ where
 
     let mut usb_scan_interval = tokio::time::interval(Duration::from_millis(1500));
     usb_scan_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // DISPLAYSWARM_USB=0: network only, for a phone that charges from this PC
+    // but should connect over Wi-Fi.
+    let usb_enabled = std::env::var("DISPLAYSWARM_USB").map(|v| v != "0").unwrap_or(true);
+    if !usb_enabled {
+        log::info!("USB (AOA) polling is off (DISPLAYSWARM_USB=0)");
+    }
     // The probe repeats every 1.5 s, so a standing failure is reported at most
     // once a minute.
     let mut last_usb_warn: Option<std::time::Instant> = None;
@@ -936,7 +947,10 @@ where
                 match accept_result {
                     Ok((stream, peer_addr)) => {
                         let _ = stream.set_nodelay(true);
+                        limit_unsent(&stream);
                         log::info!("Client connected via TCP from {}", peer_addr);
+                        // Both ends of the connection, for the UDP audio path.
+                        let udp_path = stream.local_addr().ok().map(|local| (local.ip(), peer_addr.ip()));
 
                         // No early rejection here: a client beyond MAX_SESSIONS is
                         // turned away gracefully in `handle_client_stream`, which
@@ -958,6 +972,7 @@ where
                             stop_rx.clone(),
                             "TCP client",
                             None,
+                            udp_path,
                         );
                     }
                     Err(e) => {
@@ -965,7 +980,7 @@ where
                     }
                 }
             }
-            _ = usb_scan_interval.tick() => {
+            _ = usb_scan_interval.tick(), if usb_enabled => {
                 // Check if an Android accessory is available or can be switched via AOA
                 match connect_aoa_device(&config.aoa_config).await {
                     Ok(Some(aoa_stream)) => {
@@ -989,6 +1004,7 @@ where
                             stop_rx.clone(),
                             "USB AOA client",
                             Some(reset),
+                            None,
                         );
                     }
                     Ok(None) => {}
@@ -1146,6 +1162,7 @@ fn spawn_client_session<R, W, F, C>(
     mut stop_rx: watch::Receiver<bool>,
     label: &'static str,
     aoa_reset: Option<AoaResetHandle>,
+    udp_path: Option<(std::net::IpAddr, std::net::IpAddr)>,
 ) where
     R: AsyncReadExt + Unpin + Send + 'static,
     W: AsyncWriteExt + Unpin + Send + 'static,
@@ -1196,7 +1213,7 @@ fn spawn_client_session<R, W, F, C>(
                     c = connect => c?,
                     _ = wait_for_stop(&mut stop_probe) => return Ok("server stopping".to_string()),
                 };
-                handle_client_stream(reader, writer, &config, &manager, aoa_reset_present, &mut stop_rx, &report).await
+                handle_client_stream(reader, writer, &config, &manager, aoa_reset_present, udp_path, &mut stop_rx, &report).await
             } => outcome,
             _ = watchdog => unreachable!("the watchdog never completes"),
         };
@@ -1382,6 +1399,9 @@ async fn pump_messages<R>(
         let t_recv_us = host_monotonic_us();
         shared.touch();
         if msg.channel() == CH_INPUT {
+            if !shared.input_allowed.load(Ordering::Relaxed) {
+                continue;
+            }
             // The capture's region can change while the session runs (a role
             // switch, a monitor move). Applying it here, just before the next
             // event, keeps the injector on this task, which owns it.
@@ -1470,6 +1490,52 @@ pub const LIVENESS_TIMEOUT: Duration = Duration::from_secs(3);
 /// the phone can tell "static screen" from "dead link".
 const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
 
+/// Unsent bytes the kernel may hold for a TCP session (two video fragments).
+const TCP_NOTSENT_LOWAT: i32 = 32 * 1024;
+
+/// Keeps the kernel's send queue short. [`sender_loop`] puts audio ahead of the
+/// next video fragment, but bytes already handed to the kernel go out first, and
+/// the autotuned send buffer grows to megabytes: on a slow or bursty link (a
+/// phone's hotspot) audio sat behind seconds of video. With this the socket is
+/// writable only while little is unsent, so the queueing (and the
+/// prioritising) happens in the sender instead.
+fn limit_unsent(stream: &tokio::net::TcpStream) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        let v: libc::c_int = TCP_NOTSENT_LOWAT as libc::c_int;
+        // Safety: a valid socket fd and an int option of the right size.
+        let r = unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::IPPROTO_TCP,
+                libc::TCP_NOTSENT_LOWAT,
+                &v as *const libc::c_int as *const libc::c_void,
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if r != 0 {
+            log::debug!("TCP_NOTSENT_LOWAT not set: {}", std::io::Error::last_os_error());
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (stream, TCP_NOTSENT_LOWAT);
+}
+
+/// Hands the session's freed frame buffers back to the OS. glibc keeps freed
+/// memory in per-thread arenas; after a few sessions the idle daemon held
+/// ~75 MB of it.
+fn release_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // Safety: malloc_trim only releases free heap pages.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+/// One-second stats windows per info-level `Stream stats` line.
+const STATS_LOG_EVERY: u64 = 30;
+
 /// Encoded frames buffered between the encoder thread and the sender. Small on
 /// purpose: a deep queue is latency the phone would just watch go by.
 const FRAME_QUEUE_DEPTH: usize = 2;
@@ -1515,6 +1581,11 @@ struct SessionShared {
     /// pending. Consumed by the encoder thread.
     bitrate_request: AtomicU32,
     injected: AtomicU64,
+    /// False while the role takes no input (Sound only): input messages are
+    /// dropped instead of injected, whatever the phone sends.
+    input_allowed: AtomicBool,
+    /// The UDP audio path of a network session, once offered.
+    audio_udp: std::sync::OnceLock<Arc<crate::transport::audio_udp::AudioUdp>>,
     /// Latest `Stats` message from the phone.
     client_stats: Mutex<Option<Stats>>,
     end: Mutex<Option<(EndKind, String)>>,
@@ -1536,6 +1607,8 @@ impl SessionShared {
             last_rx_ms: AtomicU64::new(0),
             bitrate_request: AtomicU32::new(0),
             injected: AtomicU64::new(0),
+            input_allowed: AtomicBool::new(true),
+            audio_udp: std::sync::OnceLock::new(),
             client_stats: Mutex::new(None),
             end: Mutex::new(None),
             sent_frames: AtomicU64::new(0),
@@ -1922,6 +1995,10 @@ fn handle_control_message(
     t_recv_us: u64,
 ) {
     match msg {
+        Message::AudioUdpAnswer { port } => match shared.audio_udp.get() {
+            Some(udp) => udp.knock(port),
+            None => log::debug!("Ignoring AudioUdpAnswer: no UDP audio offered"),
+        },
         Message::SetRole { role } => match cmd_tx {
             Some(tx) => {
                 let _ = tx.send(SessionCmd::PhoneSetRole(role));
@@ -2019,6 +2096,7 @@ async fn handle_client_stream<R, W>(
     config: &ServerConfig,
     manager: &Arc<SessionManager>,
     via_aoa: bool,
+    udp_path: Option<(std::net::IpAddr, std::net::IpAddr)>,
     stop_rx: &mut watch::Receiver<bool>,
     report: &ReportFn,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>>
@@ -2112,7 +2190,13 @@ where
     }
 
     // 2. Register the session. A reconnect of the same device replaces its old
-    //    session; only a full manager turns a device away.
+    //    session; only a full manager turns a device away. USB wins over the
+    //    network: a phone that also reaches the PC over Wi-Fi (a hotspot phone
+    //    on a cable) otherwise swapped transports every few seconds.
+    if !via_aoa && manager.has_usb_session(&device_id) {
+        let why = "This phone is already connected over USB".to_string();
+        return Err(refuse(&mut writer, report, false, HELLO_BUSY, BYE_ERROR, why).await);
+    }
     let Ok(mut registration) = manager.register(&device_id, via_aoa, role).await else {
         let why = format!("This PC already serves the maximum of {MAX_SESSIONS} devices");
         return Err(refuse(&mut writer, report, false, HELLO_BUSY, BYE_ERROR, why).await);
@@ -2185,6 +2269,7 @@ where
                 allow_adaptive: config.network.adaptive_bitrate,
                 gen: registration.gen,
                 restart_tx: registration.cmd_tx.clone(),
+                audio_udp_path: udp_path,
             },
             record,
             role,
@@ -2249,10 +2334,29 @@ where
     let region_tx = Arc::new(region_tx);
 
     let mut live = Live { effective: role, pipeline: None, primary_attempted: false, panel: (env.hello.width, env.hello.height) };
+    shared.input_allowed.store(role.takes_input(), Ordering::Relaxed);
     live.pipeline = start_pipeline(&env, live.panel, role, &record, &shared, &frame_tx, &region_tx)?;
     let (bulk_tx, bulk_rx) = mpsc::channel::<Message>(BULK_QUEUE_DEPTH);
     let mut sender_task = tokio::spawn(sender_loop(writer, frame_rx, ctrl_rx, bulk_rx, shared.clone()));
 
+    // Network sessions with a phone that can take it: audio over UDP too.
+    let audio_udp = match env.audio_udp_path {
+        Some((local, peer)) if env.hello.features & wire::FEATURE_AUDIO_UDP != 0 => {
+            match crate::transport::audio_udp::AudioUdp::bind(local, peer) {
+                Ok(udp) => {
+                    let udp = Arc::new(udp);
+                    let _ = ctrl_tx.send(udp.offer());
+                    let _ = shared.audio_udp.set(udp.clone());
+                    Some(udp)
+                }
+                Err(e) => {
+                    log::warn!("audio: no UDP path ({e}); audio stays on the session");
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
     let (svc_tx, svc_rx) = mpsc::unbounded_channel::<ServiceEvent>();
     let settings = env.manager.record(&env.device_id).unwrap_or_else(|| record.clone()).settings;
     let svc_ctx = crate::services::ServiceCtx {
@@ -2261,7 +2365,7 @@ where
         features: crate::services::negotiated_features(env.hello.features, &settings),
         settings,
         role,
-        out: crate::services::ServiceOut::new(ctrl_tx.clone(), bulk_tx),
+        out: crate::services::ServiceOut::new(ctrl_tx.clone(), bulk_tx).with_audio_udp(audio_udp),
         quality: {
             let shared = shared.clone();
             crate::services::QualityHandle::new(env.bitrate_kbps, move |kbps| {
@@ -2289,6 +2393,8 @@ where
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut window_start = Instant::now();
+    // Every STATS_LOG_EVERY-th one-second window is logged at info, the rest at debug.
+    let mut stats_windows = 0u64;
     let mut last_injected: u64 = 0;
     let mut abr = env.adaptive.then(|| crate::transport::bitrate::BitrateController::new(env.bitrate_kbps));
     let mut last_reported_state: Option<CaptureState> = None;
@@ -2498,7 +2604,11 @@ where
                 }
             }
 
-            log::info!(
+            // At info every second this was ~3600 journal lines an hour per phone.
+            let level = if stats_windows % STATS_LOG_EVERY == 0 { log::Level::Info } else { log::Level::Debug };
+            stats_windows += 1;
+            log::log!(
+                level,
                 "Stream stats: {:.1} fps, {:.0} kbps, encoder {} avg {:.2} ms, dropped {}, \
                  input {:.0} ev/s ({} total){}",
                 fps,
@@ -2562,6 +2672,7 @@ where
         stop_pipeline(pipeline).await;
     }
     drop(frame_tx);
+    release_freed_memory();
 
     Ok(reason)
 }
@@ -2586,6 +2697,9 @@ struct SessionEnv {
     gen: u64,
     /// Lets a capture helper ask the session loop to rebuild the pipeline.
     restart_tx: mpsc::UnboundedSender<SessionCmd>,
+    /// The connection's (local, peer) addresses on the network transport;
+    /// `None` over USB. Audio is offered over UDP between them.
+    audio_udp_path: Option<(std::net::IpAddr, std::net::IpAddr)>,
 }
 
 struct SessionSetup {
@@ -2809,6 +2923,7 @@ async fn apply_role(
         live.pipeline = start_pipeline(env, live.panel, role, &record, shared, frame_tx, region_tx)
             .map_err(|e| format!("could not start capture for {}: {e}", role.label()))?;
         live.effective = role;
+        shared.input_allowed.store(role.takes_input(), Ordering::Relaxed);
         live.primary_attempted = false;
     }
     env.manager.update_entry(&env.device_id, env.gen, |e| {
@@ -2927,12 +3042,15 @@ mod tests {
     /// at EOF, which is how the pump terminates). Returns what was injected, the
     /// messages queued for the sender, and the shared state.
     async fn dispatch(bytes: Vec<u8>) -> (RecordingInjector, Vec<Message>, SessionShared) {
+        dispatch_with(bytes, SessionShared::new()).await
+    }
+
+    async fn dispatch_with(bytes: Vec<u8>, shared: SessionShared) -> (RecordingInjector, Vec<Message>, SessionShared) {
         let (mut client, host) = tokio::io::duplex(64 * 1024);
         let writer = tokio::spawn(async move {
             client.write_all(&bytes).await.expect("write to duplex");
             client.shutdown().await.expect("shutdown duplex");
         });
-        let shared = SessionShared::new();
         let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel();
         let mut injector = RecordingInjector::default();
         pump_messages(host, &mut injector, &shared, &ctrl_tx, None, None, None).await;
@@ -2948,6 +3066,21 @@ mod tests {
     // -----------------------------------------------------------------------
     // Message dispatch
     // -----------------------------------------------------------------------
+
+    /// Sound only takes no input: touches, pen and keys are dropped while
+    /// control messages are still answered.
+    #[tokio::test]
+    async fn test_sound_only_drops_input() {
+        assert!(!Role::SoundOnly.takes_input());
+        assert!(Role::InputPad.takes_input() && Role::Tablet.takes_input() && Role::Mirror.takes_input());
+        let shared = SessionShared::new();
+        shared.input_allowed.store(Role::SoundOnly.takes_input(), Ordering::Relaxed);
+        let (injector, ctrl, shared) =
+            dispatch_with(stream(&[pen(0.1), key(29, "a"), Message::Ping { id: 1, t_send_us: 5 }]), shared).await;
+        assert!(injector.pointers.is_empty() && injector.keys.is_empty());
+        assert_eq!(shared.injected.load(Ordering::Relaxed), 0);
+        assert!(ctrl.iter().any(|m| matches!(m, Message::Pong { .. })));
+    }
 
     /// Input and control interleave freely: input reaches the injector, a Ping
     /// yields a Pong echoing the phone's send time, stats and keyframe requests
@@ -3137,7 +3270,7 @@ mod tests {
             let report: Box<ReportFn> = Box::new(|_, _| {});
             let manager = test_manager(&Arc::new(Probe::default()), None, true);
             let result =
-                handle_client_stream(host_read, host_write, &ServerConfig::default(), &manager, false, &mut stop_rx, &*report).await;
+                handle_client_stream(host_read, host_write, &ServerConfig::default(), &manager, false, None, &mut stop_rx, &*report).await;
             assert!(result.is_err(), "{w}x{h}");
             let mut r = MessageReader::new(phone);
             match r.next().await.unwrap() {
@@ -3428,7 +3561,7 @@ mod tests {
             let manager = manager.clone();
             let task = tokio::spawn(async move {
                 let report: Box<ReportFn> = Box::new(|_, _| {});
-                handle_client_stream(host_read, host_write, &ServerConfig::default(), &manager, false, &mut stop_rx, &*report)
+                handle_client_stream(host_read, host_write, &ServerConfig::default(), &manager, false, None, &mut stop_rx, &*report)
                     .await
             });
             Phone { rx: MessageReader::new(phone_read), tx, task, stop }
@@ -4118,6 +4251,7 @@ mod tests {
                         cb.clone(),
                         stop_rx.clone(),
                         "TCP client",
+                        None,
                         None,
                     );
                 }

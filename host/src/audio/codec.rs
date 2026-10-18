@@ -14,8 +14,10 @@ pub const SAMPLE_RATE: u32 = 48_000;
 pub const FRAME_SAMPLES: usize = 480;
 /// Longest packet Opus can produce for one frame here; generous.
 const MAX_PACKET: usize = 1275;
-/// Target bitrate per channel: transparent enough for desktop audio.
-const BITRATE_PER_CHANNEL: i32 = 64_000;
+/// Target bitrate per channel. 96 kbps (192 stereo) is transparent for music,
+/// where 64 was audibly soft on cymbals and wide stereo; next to the video
+/// stream the extra ~64 kbps is noise.
+const BITRATE_PER_CHANNEL: i32 = 96_000;
 /// Most missing packets concealed in one go; beyond this the stream restarted.
 const MAX_CONCEAL: u32 = 5;
 
@@ -64,6 +66,37 @@ impl FrameChunker {
     }
 }
 
+/// Decides which frames are worth sending. Digital silence (an idle laptop,
+/// or a paused player feeding zeros) used to go out as 100 packets a second,
+/// which kept the phone decoding nothing at a real CPU and battery cost. After
+/// [`Self::HANGOVER_FRAMES`] silent frames in a row the gate closes; the first
+/// frame with sound opens it again. The hangover lets reverb tails and the
+/// phone's buffer play out before the stream stops.
+#[derive(Default)]
+pub struct SilenceGate {
+    silent_run: u32,
+}
+
+impl SilenceGate {
+    /// 300 ms of silence before the stream stops.
+    pub const HANGOVER_FRAMES: u32 = 30;
+    /// Below this every sample counts as silence (about -100 dBFS: dither and
+    /// denormals, not audio).
+    const THRESHOLD: f32 = 1e-5;
+
+    /// Whether to send `frame`. `resumed` is true for the first frame after
+    /// the gate was closed (the encoder should start from a clean state).
+    pub fn admit(&mut self, frame: &[f32]) -> (bool, bool) {
+        if frame.iter().any(|s| s.abs() > Self::THRESHOLD) {
+            let resumed = self.silent_run >= Self::HANGOVER_FRAMES;
+            self.silent_run = 0;
+            return (true, resumed);
+        }
+        self.silent_run = self.silent_run.saturating_add(1);
+        (self.silent_run <= Self::HANGOVER_FRAMES, false)
+    }
+}
+
 /// Encodes 10 ms frames into numbered [`AudioPacket`]s.
 pub struct OpusSender {
     enc: Encoder,
@@ -77,7 +110,17 @@ impl OpusSender {
         let ch = opus_channels(channels).ok_or("only mono and stereo are supported")?;
         let mut enc = Encoder::new(SAMPLE_RATE, ch, Application::Audio).map_err(|e| e.to_string())?;
         enc.set_bitrate(opus::Bitrate::Bits(BITRATE_PER_CHANNEL * channels as i32)).map_err(|e| e.to_string())?;
+        // Desktop audio is mostly music and effects: no speech-mode switching, full 20 kHz band.
+        enc.set_signal(opus::Signal::Music).map_err(|e| e.to_string())?;
+        enc.set_max_bandwidth(opus::Bandwidth::Fullband).map_err(|e| e.to_string())?;
+        enc.set_complexity(10).map_err(|e| e.to_string())?;
         Ok(Self { enc, channels, seq: 0, buf: vec![0; MAX_PACKET] })
+    }
+
+    /// Starts the next frame from a clean encoder, as after a stream gap (the
+    /// sequence numbers carry on, so the phone sees no loss to conceal).
+    pub fn reset(&mut self) {
+        let _ = self.enc.reset_state();
     }
 
     /// `pcm` is exactly one frame of interleaved samples.
@@ -241,6 +284,21 @@ mod tests {
         assert!(rx.decode(&bad).1.is_empty());
         let junk = AudioPacket { seq: 0, pts_us: 0, channels: 2, data: vec![0xFF; 3] };
         let _ = rx.decode(&junk); // must not panic
+    }
+
+    #[test]
+    fn silence_gate_closes_after_the_hangover_and_reopens_on_sound() {
+        let mut g = SilenceGate::default();
+        let quiet = vec![0.0f32; FRAME_SAMPLES * 2];
+        let loud = tone(FRAME_SAMPLES, 2, 0);
+        assert_eq!(g.admit(&loud), (true, false));
+        for _ in 0..SilenceGate::HANGOVER_FRAMES {
+            assert_eq!(g.admit(&quiet), (true, false), "the tail is still sent");
+        }
+        assert_eq!(g.admit(&quiet), (false, false));
+        assert_eq!(g.admit(&quiet), (false, false));
+        assert_eq!(g.admit(&loud), (true, true), "sound reopens it, from a clean encoder");
+        assert_eq!(g.admit(&loud), (true, false));
     }
 
     #[test]

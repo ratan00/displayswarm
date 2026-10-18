@@ -2,7 +2,7 @@
 
 use lamco_pipewire::audio::{spawn_virtual_microphone, AudioFormat, AudioSamples, PlaybackConfig, VirtualMicrophoneHandle};
 
-use super::codec::{FrameChunker, OpusReceiver, OpusSender};
+use super::codec::{FrameChunker, OpusReceiver, OpusSender, SilenceGate};
 use super::delay::{host_delay_us, median_us, HostDelay};
 use super::sink::{node_name, DefaultSinkGuard, SinkMode, VirtualSink};
 use super::sync::hub;
@@ -151,6 +151,7 @@ impl AudioOutService {
     pub fn start_with(device_id: &str, device_name: &str, make_default: bool, mirror: bool, delay_host: bool, out: ServiceOut, flowing: Arc<AtomicBool>) -> Result<Self, String> {
         let mut chunker = FrameChunker::new(2);
         let mut sender = OpusSender::new(2)?;
+        let mut gate = SilenceGate::default();
         let hub_out = out.clone();
         let flowing_cb = flowing.clone();
         // Mirroring taps the laptop's current output instead of adding one, so
@@ -167,6 +168,13 @@ impl AudioOutService {
                     return;
                 }
                 for (pts, frame) in chunker.push(pcm, end_us) {
+                    let (send, resumed) = gate.admit(&frame);
+                    if !send {
+                        continue;
+                    }
+                    if resumed {
+                        sender.reset();
+                    }
                     match sender.encode(&frame, pts) {
                         Ok(p) => {
                             // The session is gone: drop the audio, the service is about to be dropped.
@@ -360,6 +368,32 @@ mod live_tests {
         drop(svc);
         std::thread::sleep(Duration::from_millis(300));
         assert!(!nodes().to_lowercase().contains("displayswarm"), "sink left behind:\n{}", nodes());
+        let _ = std::fs::remove_file(wav);
+    }
+
+    /// Needs a running PipeWire: the passive tap of the default output (the
+    /// "mirror" setting) still hears what plays there.
+    #[test]
+    #[ignore]
+    fn live_tap_hears_the_default_output() {
+        let wav = std::env::temp_dir().join("displayswarm-live-tap.wav");
+        write_wav(&wav, 2, 2);
+        let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel();
+        let (bulk_tx, _bulk_rx) = mpsc::channel(4);
+        let out = ServiceOut::new(ctrl_tx, bulk_tx);
+        let svc = AudioOutService::start_with("live-tap", "Live Tap", false, true, false, out, Arc::new(AtomicBool::new(true))).expect("tap");
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(Command::new("pw-play").arg(&wav).status().expect("pw-play").success());
+        std::thread::sleep(Duration::from_millis(200));
+        let mut frames = 0;
+        while let Ok(m) = ctrl_rx.try_recv() {
+            if matches!(m, Message::AudioFrame(_)) {
+                frames += 1;
+            }
+        }
+        println!("live tap: {frames} Opus frames");
+        assert!(frames >= 150, "expected ~200 frames for 2 s, got {frames}");
+        drop(svc);
         let _ = std::fs::remove_file(wav);
     }
 

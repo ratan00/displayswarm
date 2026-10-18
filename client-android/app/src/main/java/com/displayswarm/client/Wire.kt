@@ -70,6 +70,10 @@ object Wire {
     /** Host -> phone: common playout delay for multi-phone sync, 0 = off. */
     const val MSG_AUDIO_SYNC = 0x0F
     const val MSG_SERVICE_STATE = 0x10
+    /** Host -> phone, network only: UDP port and AES-256-GCM key for audio ([AudioUdpClient]). */
+    const val MSG_AUDIO_UDP = 0x11
+    /** Phone -> host: our end of that UDP path. */
+    const val MSG_AUDIO_UDP_ANSWER = 0x12
 
     /** `ServiceState.enabled` bits. */
     const val SERVICE_AUDIO_OUT = 1
@@ -104,7 +108,7 @@ object Wire {
 
     /** The channel a known type travels on, or null for an unknown type. */
     fun channelOf(type: Int): Int? = when (type) {
-        in 0x01..0x10, MSG_BATTERY_STATUS, MSG_PAIR_REQUEST, MSG_PAIR_RESPONSE -> CH_CONTROL
+        in 0x01..0x12, MSG_BATTERY_STATUS, MSG_PAIR_REQUEST, MSG_PAIR_RESPONSE -> CH_CONTROL
         MSG_VIDEO_FRAME -> CH_VIDEO
         MSG_AUDIO_FRAME, MSG_MIC_FRAME -> CH_AUDIO
         in 0x40..0x46 -> CH_INPUT
@@ -126,6 +130,8 @@ object Wire {
     const val FEATURE_CLIPBOARD = 1L shl 5
     const val FEATURE_FILES = 1L shl 6
     const val FEATURE_BATTERY = 1L shl 8
+    /** The phone can take the host's audio over UDP (network sessions). */
+    const val FEATURE_AUDIO_UDP = 1L shl 9
 
     // BatteryStatus.thermal: android.os.PowerManager.THERMAL_STATUS_*.
     const val THERMAL_NONE = 0
@@ -282,6 +288,12 @@ object Wire {
         data class AudioLatency(val latencyUs: Long) : Message(MSG_AUDIO_LATENCY)
         data class AudioSync(val delayUs: Long) : Message(MSG_AUDIO_SYNC)
         data class ServiceState(val enabled: Int) : Message(MSG_SERVICE_STATE)
+        class AudioUdpOffer(val port: Int, val key: ByteArray) : Message(MSG_AUDIO_UDP) {
+            override fun equals(other: Any?) = other is AudioUdpOffer && port == other.port && key.contentEquals(other.key)
+            override fun hashCode() = port * 31 + key.contentHashCode()
+            override fun toString() = "AudioUdpOffer(port=$port)" // never log the key
+        }
+        data class AudioUdpAnswer(val port: Int) : Message(MSG_AUDIO_UDP_ANSWER)
 
         /** Phone -> host: battery percent, charging, thermal status, battery temperature in 0.1 C. */
         data class BatteryStatus(val percent: Int, val charging: Boolean, val thermal: Int, val tempDecidegrees: Int) :
@@ -437,6 +449,8 @@ object Wire {
                 is AudioLatency -> w.writeInt(latencyUs.toInt())
                 is AudioSync -> w.writeInt(delayUs.toInt())
                 is ServiceState -> w.writeByte(enabled)
+                is AudioUdpOffer -> { w.writeShort(port); w.write(key) }
+                is AudioUdpAnswer -> w.writeShort(port)
                 is BatteryStatus -> {
                     w.writeByte(percent); w.writeByte(if (charging) 1 else 0); w.writeByte(thermal)
                     w.writeShort(tempDecidegrees)
@@ -539,6 +553,8 @@ object Wire {
                     MSG_AUDIO_LATENCY -> AudioLatency(u32())
                     MSG_AUDIO_SYNC -> AudioSync(u32())
                     MSG_SERVICE_STATE -> ServiceState(u8())
+                    MSG_AUDIO_UDP -> AudioUdpOffer(u16(), ByteArray(32).also { need(32); b.get(it) })
+                    MSG_AUDIO_UDP_ANSWER -> AudioUdpAnswer(u16())
                     MSG_BATTERY_STATUS -> BatteryStatus(u8(), u8() != 0, u8(), u16().toShort().toInt())
                     MSG_PAIR_REQUEST -> PairRequest(u8(), str16(), str16(), rest())
                     MSG_PAIR_RESPONSE -> PairResponse(u8(), str16(), rest())

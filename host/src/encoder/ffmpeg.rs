@@ -502,9 +502,13 @@ impl VideoEncoder for FfmpegEncoder {
             self.pending_bitrate = None;
             return;
         }
+        // The reinit needs an IDR. A decrease is relief for a congested link and
+        // cannot wait; an increase rides the next IDR the stream has anyway, so
+        // it never adds a keyframe burst of its own.
+        if kbps < self.cfg.bitrate_kbps {
+            self.idr.request();
+        }
         self.pending_bitrate = Some(kbps);
-        // The reinit needs an IDR; ask for one now instead of waiting for the safety IDR.
-        self.idr.request();
     }
 
     fn backend_name(&self) -> String {

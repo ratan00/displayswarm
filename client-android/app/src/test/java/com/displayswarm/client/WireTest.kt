@@ -43,6 +43,8 @@ class WireTest {
             one("audio_latency", Message.AudioLatency(45_000)),
             one("audio_sync", Message.AudioSync(120_000)),
             one("service_state", Message.ServiceState(Wire.SERVICE_AUDIO_OUT or Wire.SERVICE_MIC)),
+            one("audio_udp_offer", Message.AudioUdpOffer(50_000, ByteArray(32) { 0x11 })),
+            one("audio_udp_answer", Message.AudioUdpAnswer(41_000)),
             one("video_frame", Message.VideoFrame(
                 video.codec, video.frameType, video.frameIndex, video.captureUs, byteArrayOf(0, 0, 0, 1, 0x65)
             )),

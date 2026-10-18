@@ -24,7 +24,9 @@ class ControlSession(
     /** The session is over (host said BYE, or the link went silent); the argument is the final status text. */
     private val onEnded: (status: String) -> Unit,
     /** The effective role changed (HelloAck, host SetRole or a request from this phone). */
-    private val onRole: (RoleState) -> Unit = {}
+    private val onRole: (RoleState) -> Unit = {},
+    /** Network sessions: (our TCP address, the host's), for the UDP audio path; null over USB. */
+    private val udpLink: Pair<java.net.InetAddress?, java.net.InetAddress>? = null,
 ) : VideoDecoder.Listener {
     companion object {
         private const val TAG = "DisplaySwarmSession"
@@ -247,7 +249,22 @@ class ControlSession(
 
     /** Encoded BYE(NORMAL), for the transport to send as its last packet. */
     /** The session is over: stop its services. Transports call this on teardown. */
-    fun close() = PhoneServices.stop()
+    @Volatile
+    private var audioUdp: AudioUdpClient? = null
+
+    fun close() {
+        audioUdp?.stop()
+        audioUdp = null
+        PhoneServices.stop()
+    }
+
+    /** The host offered audio over UDP: answer it if this is a network session. */
+    private fun startAudioUdp(offer: Wire.Message.AudioUdpOffer) {
+        val (local, host) = udpLink ?: return
+        audioUdp?.stop()
+        audioUdp = AudioUdpClient(local, host, offer.port, offer.key, ::send) { PhoneServices.dispatch(it) }
+            .also { it.start() }
+    }
 
     fun byePacket(): ByteArray =
         Wire.Message.Bye(Wire.BYE_NORMAL, "client disconnect").encode()
@@ -318,6 +335,7 @@ class ControlSession(
                 if (RoleState.isValid(msg.role)) applyRole(roleState.onHostSetRole(msg.role))
             }
             is Wire.Message.SetBitrate -> Log.i(TAG, "Host bitrate now ${msg.kbps} kbps")
+            is Wire.Message.AudioUdpOffer -> startAudioUdp(msg)
             is Wire.Message.Unknown -> Log.d(TAG, "Skipping unknown message $msg")
             // Audio, clipboard, files, ...: the session's services (PhoneServices).
             else -> if (!PhoneServices.dispatch(msg)) Log.d(TAG, "Ignoring $msg")

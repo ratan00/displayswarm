@@ -127,7 +127,11 @@ class AoaManager(
                         @Suppress("DEPRECATION")
                         intent.getParcelableExtra(UsbManager.EXTRA_ACCESSORY)
                     }
-                    if (acc != null && acc == accessory) {
+                    // Not `acc == accessory`: UsbAccessory.equals() reads the serial,
+                    // which needs USB permission, and the permission is already gone
+                    // once the cable is out. It threw SecurityException and crashed the app.
+                    val current = accessory
+                    if (acc != null && current != null && sameAccessory(acc, current)) {
                         Log.i(TAG, "USB accessory detached: ${acc.model}")
                         endStatus = endStatus ?: "USB Accessory Detached"
                         disconnect()
@@ -137,16 +141,20 @@ class AoaManager(
         }
     }
 
+    /** Same accessory by its descriptive fields; never touches the permission-guarded serial. */
+    private fun sameAccessory(a: UsbAccessory, b: UsbAccessory) =
+        a.manufacturer == b.manufacturer && a.model == b.model &&
+            a.version == b.version && a.description == b.description
+
     init {
         val filter = IntentFilter().apply {
             addAction(ACTION_USB_PERMISSION)
             addAction(UsbManager.ACTION_USB_ACCESSORY_DETACHED)
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(usbReceiver, filter, Context.RECEIVER_EXPORTED)
-        } else {
-            context.registerReceiver(usbReceiver, filter)
-        }
+        // Exported: the USB permission result comes back from the system.
+        androidx.core.content.ContextCompat.registerReceiver(
+            context, usbReceiver, filter, androidx.core.content.ContextCompat.RECEIVER_EXPORTED
+        )
         isReceiverRegistered = true
     }
 

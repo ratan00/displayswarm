@@ -14,9 +14,10 @@ import android.util.Log
 /**
  * Sends the phone's microphone to the host: `AudioRecord` (voice-communication
  * source, so the platform's echo cancellation and noise suppression apply) ->
- * MediaCodec Opus encoder -> `MicFrame`. The encoder needs API 29; below that,
- * or without the RECORD_AUDIO permission or with the mic switched off in
- * [AudioSettings], the feature bit is not offered and nothing runs.
+ * libopus (or, without the native library, the MediaCodec Opus encoder, API 29)
+ * -> `MicFrame`. Without an encoder, the feature bit is not offered; without the
+ * RECORD_AUDIO permission or with the mic switched off in [AudioSettings],
+ * nothing runs.
  */
 class MicCapture(private val context: Context) : PhoneService {
     override val name = "mic-capture"
@@ -24,7 +25,7 @@ class MicCapture(private val context: Context) : PhoneService {
     // Always offered where the encoder exists; the recorder only runs while
     // the switch is on and the permission is granted.
     override val features: Long
-        get() = if (AudioSettings.micSupported) Wire.FEATURE_MIC else 0L
+        get() = if (OpusNative.available || AudioSettings.micSupported) Wire.FEATURE_MIC else 0L
 
     @Volatile
     private var running = false
@@ -65,6 +66,7 @@ class MicCapture(private val context: Context) : PhoneService {
         val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         var rec: AudioRecord? = null
         var codec: MediaCodec? = null
+        var native = 0L
         val effects = ArrayList<android.media.audiofx.AudioEffect>()
         try {
             rec = AudioRecord(
@@ -79,14 +81,19 @@ class MicCapture(private val context: Context) : PhoneService {
             if (AcousticEchoCanceler.isAvailable()) AcousticEchoCanceler.create(rec.audioSessionId)?.let { it.enabled = true; effects += it }
             if (NoiseSuppressor.isAvailable()) NoiseSuppressor.create(rec.audioSessionId)?.let { it.enabled = true; effects += it }
 
-            val fmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, SAMPLE_RATE, 1)
-            fmt.setInteger(MediaFormat.KEY_BIT_RATE, BITRATE)
-            codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS)
-            codec.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-            codec.start()
+            if (OpusNative.available) native = OpusNative.encoderCreate(1, BITRATE, voice = true)
+            if (native == 0L) {
+                val fmt = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, SAMPLE_RATE, 1)
+                fmt.setInteger(MediaFormat.KEY_BIT_RATE, BITRATE)
+                codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS).also {
+                    it.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                    it.start()
+                }
+            }
             rec.startRecording()
 
             val pcm = ShortArray(frame)
+            val packet = ByteArray(1500)
             val info = MediaCodec.BufferInfo()
             var seq = 0L
             var pts = 0L
@@ -98,6 +105,15 @@ class MicCapture(private val context: Context) : PhoneService {
                     got += n
                 }
                 if (got < frame) break
+                if (native != 0L) {
+                    val n = OpusNative.encode(native, pcm, frame, packet)
+                    if (n > 0) {
+                        send(Wire.Message.Audio(Wire.MSG_MIC_FRAME, seq, PhoneClock.nowUs(), 1, packet.copyOf(n)))
+                        seq = (seq + 1) and 0xFFFF_FFFFL
+                    }
+                    continue
+                }
+                val codec = codec!!
                 val i = codec.dequeueInputBuffer(10_000)
                 if (i >= 0) {
                     val buf = codec.getInputBuffer(i)!!
@@ -128,6 +144,7 @@ class MicCapture(private val context: Context) : PhoneService {
             rec?.release()
             try { codec?.stop() } catch (_: Exception) {}
             codec?.release()
+            if (native != 0L) OpusNative.encoderDestroy(native)
         }
     }
 

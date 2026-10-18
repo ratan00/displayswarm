@@ -64,6 +64,8 @@ fn samples() -> Vec<(&'static str, Vec<u8>, Message)> {
         one("audio_latency", Message::AudioLatency { latency_us: 45_000 }),
         one("audio_sync", Message::AudioSync { delay_us: 120_000 }),
         one("service_state", Message::ServiceState { enabled: SERVICE_AUDIO_OUT | SERVICE_MIC }),
+        one("audio_udp_offer", Message::AudioUdpOffer { port: 50_000, key: [0x11; 32] }),
+        one("audio_udp_answer", Message::AudioUdpAnswer { port: 41_000 }),
         one("video_frame", Message::VideoFrame(VideoFrame {
             data: vec![0, 0, 0, 1, 0x65],
             ..video.clone()

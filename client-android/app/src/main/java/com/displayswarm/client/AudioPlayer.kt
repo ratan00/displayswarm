@@ -78,6 +78,15 @@ class AudioPlayer(private val context: Context) : PhoneService {
     @Volatile
     private var lastPacketMs = 0L
 
+    // The audio switch, cached: it was read from SharedPreferences (with a new
+    // AppSettings each time) twice per 10 ms packet.
+    @Volatile
+    private var playbackOn = true
+    private val prefs = context.applicationContext.getSharedPreferences(AppSettings.PREFS_NAME, Context.MODE_PRIVATE)
+    private val prefsListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == AppSettings.KEY_AUDIO_OUT) playbackOn = AudioSettings.playbackEnabled(context)
+    }
+
     // -- multi-phone sync (see SyncAlign): 0 = off, play as soon as possible.
     @Volatile
     private var syncDelayUs = 0L
@@ -99,7 +108,7 @@ class AudioPlayer(private val context: Context) : PhoneService {
             return
         }
         val a = msg as? Wire.Message.Audio ?: return
-        if (!AudioSettings.playbackEnabled(context)) return
+        if (!playbackOn) return
         lastPacketMs = System.nanoTime() / 1_000_000
         clock?.takeIf { it.hasSync }?.let { transit.add(PhoneClock.nowUs() - it.hostToPhoneUs(a.ptsUs)) }
         // A full queue means decoding is stuck: keep the newest audio.
@@ -108,6 +117,8 @@ class AudioPlayer(private val context: Context) : PhoneService {
 
     override fun onSessionStart(ctx: PhoneServiceContext) {
         running = true
+        playbackOn = AudioSettings.playbackEnabled(context)
+        prefs.registerOnSharedPreferenceChangeListener(prefsListener)
         clock = ctx.clock
         send = ctx.send
         syncDelayUs = 0
@@ -119,6 +130,7 @@ class AudioPlayer(private val context: Context) : PhoneService {
     }
 
     override fun onSessionEnd() {
+        prefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
         running = false
         decodeThread?.interrupt()
         synchronized(lock) { lock.notifyAll() }
@@ -131,31 +143,53 @@ class AudioPlayer(private val context: Context) : PhoneService {
 
     private fun decodeLoop() {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+        // libopus when the native library loaded, MediaCodec otherwise.
+        var native = 0L
         var codec: MediaCodec? = null
+        val pcmBuf = ShortArray(OpusNative.MAX_FRAME_SAMPLES * 2)
         val seq = SeqTracker()
         var channels = 0
         var lastSamples = 480
         try {
             while (running) {
                 val p = rx.poll(100, TimeUnit.MILLISECONDS) ?: continue
-                if (codec == null) {
+                if (native == 0L && codec == null) {
                     channels = p.channels
-                    codec = startDecoder(channels) ?: return
+                    if (OpusNative.available) native = OpusNative.decoderCreate(channels)
+                    if (native == 0L) codec = startDecoder(channels) ?: return
+                    Log.i(TAG, "audio decoder: ${if (native != 0L) "libopus" else "MediaCodec"}, $channels ch")
                     startPlayback(channels)
                 }
                 if (p.channels != channels) continue
                 when (val v = seq.classify(p.seq)) {
                     is SeqVerdict.Stale -> continue
-                    is SeqVerdict.Gap -> repeat(v.missing) { enqueue(Chunk(ShortArray(lastSamples * channels), lastSamples)) }
+                    is SeqVerdict.Gap -> repeat(v.missing) {
+                        if (native != 0L) {
+                            // Opus packet loss concealment: a plausible continuation, not a click of silence.
+                            val n = OpusNative.decode(native, null, 0, pcmBuf, lastSamples)
+                            if (n > 0) enqueue(Chunk(pcmBuf.copyOf(n * channels), n))
+                        } else {
+                            enqueue(Chunk(ShortArray(lastSamples * channels), lastSamples))
+                        }
+                    }
                     is SeqVerdict.InOrder -> {}
                 }
-                decode(codec, p, channels)?.let { lastSamples = it }
+                if (native != 0L) {
+                    val n = OpusNative.decode(native, p.data, p.data.size, pcmBuf, OpusNative.MAX_FRAME_SAMPLES)
+                    if (n > 0) {
+                        enqueue(Chunk(pcmBuf.copyOf(n * channels), n, p.ptsUs))
+                        lastSamples = n
+                    }
+                } else {
+                    decode(codec!!, p, channels)?.let { lastSamples = it }
+                }
             }
         } catch (e: InterruptedException) {
             // session over
         } catch (e: Exception) {
             Log.w(TAG, "audio decode stopped", e)
         } finally {
+            if (native != 0L) OpusNative.decoderDestroy(native)
             try {
                 codec?.stop()
             } catch (_: Exception) {
@@ -230,15 +264,46 @@ class AudioPlayer(private val context: Context) : PhoneService {
         val track = buildTrack(channels)
         try {
             track.play()
+            // The app's own jitter buffer absorbs the network; the track's buffer
+            // only has to cover the mixer's burst. Start at two bursts and grow
+            // one burst at a time on real underruns (cut ~40 ms of output delay).
+            val burst = framesPerBurst()
+            var bufFrames = (burst * 2).coerceAtMost(track.bufferCapacityInFrames)
+            track.bufferSizeInFrames = bufFrames
+            var underruns = track.underrunCount
             var audible = true
             var written = 0L // frames per channel handed to the track
             var lastReportMs = 0L
             val ts = AudioTimestamp()
+            var paused = false
             while (running) {
-                val chunk = nextChunk() ?: continue
+                val chunk = nextChunk()
+                if (chunk == null) {
+                    // The host stops sending during silence: let the audio
+                    // hardware sleep instead of playing an underrun.
+                    if (!paused && System.nanoTime() / 1_000_000 - lastPacketMs > IDLE_PAUSE_MS) {
+                        track.pause()
+                        paused = true
+                    }
+                    continue
+                }
+                if (paused) {
+                    track.play()
+                    paused = false
+                    underruns = track.underrunCount
+                }
+                val u = track.underrunCount
+                if (u > underruns) {
+                    underruns = u
+                    if (synchronized(lock) { queuedMs } > 0 && bufFrames < track.bufferCapacityInFrames) {
+                        bufFrames = (bufFrames + burst).coerceAtMost(track.bufferCapacityInFrames)
+                        track.bufferSizeInFrames = bufFrames
+                        Log.i(TAG, "output buffer raised to $bufFrames frames after an underrun")
+                    }
+                }
                 // Muting keeps the track fed, so pacing and the jitter buffer
                 // carry on and unmuting is instant.
-                val on = AudioSettings.playbackEnabled(context)
+                val on = playbackOn
                 if (on != audible) {
                     audible = on
                     track.setVolume(if (on) 1f else 0f)
@@ -329,8 +394,15 @@ class AudioPlayer(private val context: Context) : PhoneService {
             val silence = System.nanoTime() / 1_000_000 - lastPacketMs
             ctl.onUnderrun(silence)
         }
-        lock.wait(20)
+        // Idle (nothing from the host for a while): wake rarely; enqueue() notifies anyway.
+        lock.wait(if (System.nanoTime() / 1_000_000 - lastPacketMs > IDLE_PAUSE_MS) 250 else 20)
         null
+    }
+
+    /** The mixer's burst size (frames per callback), from the platform; 240 if unknown. */
+    private fun framesPerBurst(): Int {
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+        return am.getProperty(android.media.AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER)?.toIntOrNull()?.takeIf { it > 0 } ?: 240
     }
 
     private fun buildTrack(channels: Int): AudioTrack {
@@ -349,7 +421,8 @@ class AudioPlayer(private val context: Context) : PhoneService {
                     .build(),
             )
             .setAudioFormat(fmt)
-            .setBufferSizeInBytes(maxOf(min, SAMPLE_RATE / 100 * channels * 2 * 2))
+            // Capacity only (room to grow after underruns); the size in use is set in playLoop.
+            .setBufferSizeInBytes(maxOf(min, SAMPLE_RATE / 10 * channels * 2))
             .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
@@ -363,5 +436,7 @@ class AudioPlayer(private val context: Context) : PhoneService {
         private const val FALLBACK_OUTPUT_LATENCY_US = 40_000L
         private const val DECODE_ALLOWANCE_US = 10_000L
         private const val SYNC_QUEUE_SLACK_MS = 300
+        /** No audio from the host for this long: pause the track. */
+        private const val IDLE_PAUSE_MS = 1_000L
     }
 }

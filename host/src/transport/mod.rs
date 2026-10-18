@@ -1,4 +1,5 @@
 pub mod aoa;
+pub mod audio_udp;
 pub mod bitrate;
 pub mod firewall;
 pub mod mdns;
