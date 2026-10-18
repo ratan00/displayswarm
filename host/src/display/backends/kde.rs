@@ -62,6 +62,9 @@ pub fn plan_ops(state: &State, ops: &[LayoutOp]) -> Result<(Vec<String>, Vec<(St
             LayoutOp::MirrorNone { name } => args.push(format!("output.{}.mirror.none", id_of(name)?)),
             LayoutOp::SetPrimary { name } => args.push(format!("output.{}.priority.1", id_of(name)?)),
             LayoutOp::Move { name, x, y } => args.push(format!("output.{}.position.{x},{y}", id_of(name)?)),
+            LayoutOp::SetScale { name, percent } => {
+                args.push(format!("output.{}.scale.{}", id_of(name)?, *percent as f64 / 100.0))
+            }
             LayoutOp::SetMode { name, mode } => {
                 id_of(name)?;
                 modes.push((name.clone(), *mode));

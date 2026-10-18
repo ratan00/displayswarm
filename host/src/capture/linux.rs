@@ -1021,7 +1021,7 @@ fn portal_request_for(
             portal::ScreencastRequest::monitor(env_output.or_else(|| output.clone()), token_key),
             None,
         ),
-        CaptureTarget::Virtual { width, height, refresh_mhz } => (
+        CaptureTarget::Virtual { width, height, refresh_mhz, density_dpi } => (
             portal::ScreencastRequest {
                 source_type: portal::SOURCE_TYPE_VIRTUAL,
                 output_filter: None,
@@ -1031,6 +1031,7 @@ fn portal_request_for(
                 width: *width,
                 height: *height,
                 refresh_mhz: *refresh_mhz,
+                density_dpi: *density_dpi,
             }),
         ),
         CaptureTarget::Window => (
@@ -2065,7 +2066,7 @@ impl LinuxCapturer {
                         Err(e) => log::warn!("X11 session: direct screen capture failed ({e}); trying the other backends"),
                     }
                 }
-                CaptureTarget::Virtual { width: vw, height: vh, refresh_mhz } => {
+                CaptureTarget::Virtual { width: vw, height: vh, refresh_mhz, .. } => {
                     // The device id is the first part of the token key ("<id>/virtual").
                     let device = token_key.and_then(|k| k.split('/').next()).unwrap_or("phone");
                     match X11Capturer::for_virtual(width, height, device, *vw, *vh, *refresh_mhz) {
@@ -2623,7 +2624,7 @@ mod tests {
         assert_eq!(r.token_key, None);
 
         let (r, m) = portal_request_for(
-            &CaptureTarget::Virtual { width: 1280, height: 800, refresh_mhz: 59_940 },
+            &CaptureTarget::Virtual { width: 1280, height: 800, refresh_mhz: 59_940, density_dpi: 0 },
             Some("d/virtual"),
             Some("ignored".into()),
         );
@@ -2648,7 +2649,7 @@ mod tests {
         let _ = env_logger::builder().is_test(true).filter_level(log::LevelFilter::Info).try_init();
         let (w, h) = (1600, 720);
         let mut cap = LinuxCapturer::new_for(
-            &CaptureTarget::Virtual { width: w, height: h, refresh_mhz: 60_000 },
+            &CaptureTarget::Virtual { width: w, height: h, refresh_mhz: 60_000, density_dpi: 0 },
             Some("livetest/virtual"),
             w,
             h,
@@ -2694,7 +2695,7 @@ mod tests {
         let panel_off = std::env::var("DISPLAYSWARM_LIVE_PANEL_OFF").as_deref() == Ok("1");
         let (w, h) = (1600, 720);
         let mut cap = LinuxCapturer::new_for(
-            &CaptureTarget::Virtual { width: w, height: h, refresh_mhz: 60_000 },
+            &CaptureTarget::Virtual { width: w, height: h, refresh_mhz: 60_000, density_dpi: 0 },
             Some("livetest/virtual"),
             w,
             h,

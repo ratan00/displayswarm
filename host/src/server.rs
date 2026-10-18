@@ -621,6 +621,7 @@ pub fn target_for(role: Role, record: &DeviceRecord, hello: &Hello) -> Option<Ca
             width: hello.width as u32,
             height: hello.height as u32,
             refresh_mhz: hello.refresh_mhz,
+            density_dpi: hello.density_dpi,
         }),
         Role::MirrorWindow => Some(CaptureTarget::Window),
         Role::Tablet | Role::InputPad => None,
@@ -3454,7 +3455,7 @@ mod tests {
         assert_eq!(target_for(Role::Mirror, &rec, &hello), Some(CaptureTarget::Monitor { output: Some("eDP-1".into()) }));
         rec.target_output = None;
         assert_eq!(target_for(Role::Mirror, &rec, &hello), Some(CaptureTarget::Monitor { output: None }));
-        let virt = CaptureTarget::Virtual { width: 2400, height: 1080, refresh_mhz: 120_000 };
+        let virt = CaptureTarget::Virtual { width: 2400, height: 1080, refresh_mhz: 120_000, density_dpi: 0 };
         assert_eq!(target_for(Role::Extend, &rec, &hello), Some(virt.clone()));
         assert_eq!(target_for(Role::PhonePrimary, &rec, &hello), Some(virt));
         assert_eq!(target_for(Role::MirrorWindow, &rec, &hello), Some(CaptureTarget::Window));
@@ -3489,7 +3490,7 @@ mod tests {
         wait_until("the virtual capturer", || probe.built.lock().unwrap().len() == 2).await;
         {
             let built = probe.built.lock().unwrap();
-            assert_eq!(built[1].0, CaptureTarget::Virtual { width: 1600, height: 720, refresh_mhz: 60_000 });
+            assert_eq!(built[1].0, CaptureTarget::Virtual { width: 1600, height: 720, refresh_mhz: 60_000, density_dpi: 0 });
             assert_eq!(built[1].1.as_deref(), Some("dev1/virtual"));
         }
         phone.finish().await;
@@ -3642,7 +3643,7 @@ mod tests {
         wait_until("the rebuilt capturer", || probe.built.lock().unwrap().len() == 3).await;
         {
             let built = probe.built.lock().unwrap();
-            assert_eq!(built[2].0, CaptureTarget::Virtual { width: 720, height: 1600, refresh_mhz: 60_000 });
+            assert_eq!(built[2].0, CaptureTarget::Virtual { width: 720, height: 1600, refresh_mhz: 60_000, density_dpi: 0 });
             assert_eq!(built.len(), 3, "repeats and bad sizes rebuild nothing");
         }
         assert_eq!(probe.dropped.load(Ordering::SeqCst), 2, "the old capturers are dropped");
@@ -3657,7 +3658,7 @@ mod tests {
         assert_eq!(phone.set_role(wire::ROLE_EXTEND).await, wire::ROLE_EXTEND);
         assert_eq!(
             probe.built.lock().unwrap()[5].0,
-            CaptureTarget::Virtual { width: 1600, height: 720, refresh_mhz: 60_000 }
+            CaptureTarget::Virtual { width: 1600, height: 720, refresh_mhz: 60_000, density_dpi: 0 }
         );
         phone.finish().await;
     }

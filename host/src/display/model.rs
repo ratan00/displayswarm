@@ -283,6 +283,16 @@ pub enum LayoutOp {
     SetPrimary { name: String },
     Move { name: String, x: i32, y: i32 },
     SetMode { name: String, mode: Mode },
+    /// Desktop scale in percent (100 = 1x, 200 = 2x).
+    SetScale { name: String, percent: u32 },
+}
+
+/// The desktop scale, in percent, that makes a monitor of `density_dpi` (Android
+/// density: 160 is 1x) readable: in 25% steps, between 100% and 300%. The
+/// desktop default for the phone's monitor would be 100%, which is tiny at 320 dpi.
+pub fn scale_percent_for_dpi(density_dpi: u16) -> u32 {
+    let raw = density_dpi as u32 * 100 / 160;
+    (((raw + 12) / 25) * 25).clamp(100, 300)
 }
 
 #[cfg(test)]
@@ -302,6 +312,15 @@ mod tests {
     }
 
     const FULL: CaptureCaps = CaptureCaps { portal: true, monitor: true, window: true, virtual_: true };
+
+    #[test]
+    fn phone_density_maps_to_a_desktop_scale() {
+        assert_eq!(scale_percent_for_dpi(0), 100);
+        assert_eq!(scale_percent_for_dpi(160), 100);
+        assert_eq!(scale_percent_for_dpi(320), 200);
+        assert_eq!(scale_percent_for_dpi(420), 250);
+        assert_eq!(scale_percent_for_dpi(1000), 300);
+    }
 
     #[test]
     fn full_session_supports_every_role() {

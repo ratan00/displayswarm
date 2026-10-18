@@ -474,7 +474,7 @@ impl WindowsCapturer {
                     }
                 }
             }
-            CaptureTarget::Virtual { width: vw, height: vh, refresh_mhz } => {
+            CaptureTarget::Virtual { width: vw, height: vh, refresh_mhz, .. } => {
                 let provider = crate::display::windows_caps::virtual_monitor_provider()?;
                 let mode = crate::display::model::Mode { width: *vw, height: *vh, refresh_mhz: *refresh_mhz };
                 let label = format!(

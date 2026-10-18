@@ -250,6 +250,7 @@ fn apply_op(layout: &mut Layout, op: &LayoutOp) {
                 }
             }
         }
+        LayoutOp::SetScale { .. } => {}
         LayoutOp::SetMode { name, mode } => {
             if let Some(i) = find(layout, name) {
                 let o = &mut layout.outputs[i];

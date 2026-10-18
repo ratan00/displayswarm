@@ -204,6 +204,7 @@ pub fn plan_ops(state: &RandrState, ops: &[LayoutOp]) -> Result<(Vec<String>, Ve
             | LayoutOp::MirrorNone { name }
             | LayoutOp::SetPrimary { name }
             | LayoutOp::Move { name, .. }
+            | LayoutOp::SetScale { name, .. }
             | LayoutOp::SetMode { name, .. } => name,
         };
         let out = state.by_name(name).ok_or_else(|| format!("{name} is not in the layout"))?;
@@ -225,6 +226,8 @@ pub fn plan_ops(state: &RandrState, ops: &[LayoutOp]) -> Result<(Vec<String>, Ve
                 }
                 push(name, &["--pos".into(), format!("{x}x{y}")]);
             }
+            // RandR has no per-output desktop scale.
+            LayoutOp::SetScale { .. } => {}
             LayoutOp::SetMode { mode, .. } => match find_mode(state, out, *mode) {
                 Some(m) => push(name, &["--mode".into(), format!("0x{:x}", m.id)]),
                 None => modes.push((name.clone(), *mode)),

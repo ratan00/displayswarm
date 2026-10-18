@@ -118,6 +118,13 @@ pub fn plan_ops(state: &State, ops: &[LayoutOp]) -> Result<Vec<LogicalConfig>, S
                 cfgs[i].x = *x;
                 cfgs[i].y = *y;
             }
+            LayoutOp::SetScale { name, percent } => {
+                monitor(name)?;
+                let i = position_of(&cfgs, name).ok_or(format!("{name} is switched off"))?;
+                // Mutter only takes the scales a mode lists, and by default those
+                // are whole numbers.
+                cfgs[i].scale = ((*percent as f64 / 100.0).round()).max(1.0);
+            }
             LayoutOp::SetMode { name, mode } => {
                 let m = monitor(name)?;
                 // Mutter's modes carry no separate refresh rate here, so the size decides.
