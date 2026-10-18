@@ -158,6 +158,7 @@ class AppSettings(private val store: SettingsStore) {
         const val KEY_PEN_BUTTON_1 = "pen_button_1"
         const val KEY_PEN_BUTTON_2 = "pen_button_2"
         const val KEY_NATURAL_SCROLL = "natural_scroll"
+        const val KEY_AUTO_SCALE = "auto_scale"
         const val KEY_POINTER_SPEED = "pointer_speed"
         const val KEY_MACROS = "macros"
         const val KEY_LAST_HOST = "last_host"
@@ -232,6 +233,11 @@ class AppSettings(private val store: SettingsStore) {
         set(v) = set(KEY_PEN_BUTTON_2, v.id)
 
     val penMapping: PenButtonMapping get() = PenButtonMapping(penButton1, penButton2)
+
+    /** Tell the host the real screen density so it can scale this phone's monitor; off reports 160 dpi (100%). */
+    var autoScale: Boolean
+        get() = store.getBoolean(KEY_AUTO_SCALE, true)
+        set(v) = set(KEY_AUTO_SCALE, v)
 
     var naturalScroll: Boolean
         get() = store.getBoolean(KEY_NATURAL_SCROLL, true)

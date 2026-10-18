@@ -74,6 +74,11 @@ class SettingsActivity : AppCompatActivity() {
         column.switchRow("Host audio on this phone", null, state.audioOut) { actions.setAudio(it) }
         column.switchRow("Phone microphone to host", null, state.mic) { actions.setMic(it) }
 
+        column.section("Display")
+        column.switchRow("Scale this screen on the host", "Off: the host keeps its monitor for this phone at 100%. Applies on the next connection.", state.autoScale) {
+            state.autoScale = it; s.autoScale = it
+        }
+
         column.section("Touchpad")
         column.switchRow("Touchpad mode", "Off: fingers act directly on the screen", state.touchMode == TouchMode.TOUCHPAD) {
             actions.setTouchMode(if (it) TouchMode.TOUCHPAD else TouchMode.DIRECT)

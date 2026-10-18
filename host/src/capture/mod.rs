@@ -118,7 +118,7 @@ pub enum CaptureTarget {
     /// A new virtual monitor of this size and refresh (portal source type
     /// VIRTUAL); it disappears when the capturer is dropped.
     /// (Role::Extend, Role::PhonePrimary)
-    Virtual { width: u32, height: u32, refresh_mhz: u32 },
+    Virtual { width: u32, height: u32, refresh_mhz: u32, density_dpi: u16 },
     /// One application window, chosen in the portal dialog. (Role::MirrorWindow)
     Window,
 }

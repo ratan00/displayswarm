@@ -182,6 +182,8 @@ pub struct VirtualMode {
     pub width: u32,
     pub height: u32,
     pub refresh_mhz: u32,
+    /// The phone's density, which decides the desktop scale of its monitor.
+    pub density_dpi: u16,
 }
 
 impl VirtualMode {
@@ -204,7 +206,7 @@ fn watch_for_virtual_monitor(
     mode: VirtualMode,
     region_out: SharedRegion,
 ) {
-    use crate::display::model::{Desktop, LayoutOp, Mode};
+    use crate::display::model::{scale_percent_for_dpi, Desktop, LayoutOp, Mode};
     use crate::display::{backend::find_new_output, primary};
     let is_kde = crate::display::env::current_desktop() == Desktop::Kde;
     std::thread::spawn(move || {
@@ -226,6 +228,20 @@ fn watch_for_virtual_monitor(
                             }
                         }
                         Err(e) => log::warn!("native capture: could not give {name} the phone's size ({}); streaming it as it is", e.summary()),
+                    }
+                }
+                if std::env::var_os("DISPLAYSWARM_NO_AUTOSCALE").is_none() {
+                    let percent = scale_percent_for_dpi(mode.density_dpi);
+                    if percent > 100 {
+                        match backend.apply(&[LayoutOp::SetScale { name: name.clone(), percent }]) {
+                            Ok(()) => {
+                                log::info!("native capture: {name} scaled to {percent}% for {} dpi", mode.density_dpi);
+                                if let Some(r) = backend.snapshot().ok().and_then(|l| l.output(&name)?.region) {
+                                    region = r;
+                                }
+                            }
+                            Err(e) => log::warn!("native capture: could not scale {name} ({}); leaving it at 100%", e.summary()),
+                        }
                     }
                 }
                 log::info!("native capture: virtual monitor found at {region:?}");

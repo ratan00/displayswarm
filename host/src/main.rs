@@ -165,6 +165,7 @@ fn to_row(d: &DeviceInfo, hist: Option<&History>, flashing: bool) -> DeviceRow {
         mic: d.settings.mic,
         clipboard: d.settings.clipboard,
         battery_saver: d.settings.battery_saver,
+        auto_scale: d.settings.auto_scale,
         panel_off: d.panel_off,
         show_panel_off: shown == Some(Role::PhonePrimary),
         target_output: d.target_output.clone().unwrap_or_default().into(),
@@ -578,6 +579,7 @@ fn wire_callbacks(ui: &MainWindow) {
                 6 => settings.audio_mirror = value,
                 7 => settings.audio_always_ready = value,
                 8 => settings.delay_host_audio = value,
+                9 => settings.auto_scale = value,
                 _ => return,
             }
             send(&weak, Request::SetDeviceSettings { device_id: d.device_id, settings });

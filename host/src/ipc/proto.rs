@@ -22,7 +22,7 @@
 //!
 //! Events are only sent after the connection has sent [`Request::Subscribe`].
 //! Roles travel as the stable strings of [`role_key`] (`mirror`, `extend`,
-//! `mirror_window`, `phone_primary`, `tablet`, `input_pad`).
+//! `mirror_window`, `phone_primary`, `tablet`, `input_pad`, `sound_only`).
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -45,6 +45,7 @@ pub fn role_key(role: Role) -> &'static str {
         Role::PhonePrimary => "phone_primary",
         Role::Tablet => "tablet",
         Role::InputPad => "input_pad",
+        Role::SoundOnly => "sound_only",
     }
 }
 

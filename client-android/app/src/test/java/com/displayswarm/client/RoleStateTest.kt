@@ -59,10 +59,10 @@ class RoleStateTest {
     }
 
     @Test
-    fun onlyTabletAndInputPadHaveNoVideo() {
+    fun onlyTabletInputPadAndSoundOnlyHaveNoVideo() {
         for (r in RoleState.ALL_ROLES) {
-            assertEquals(r != Wire.ROLE_TABLET && r != Wire.ROLE_INPUT_PAD, RoleState.hasVideo(r))
+            assertEquals(r != Wire.ROLE_TABLET && r != Wire.ROLE_INPUT_PAD && r != Wire.ROLE_SOUND_ONLY, RoleState.hasVideo(r))
         }
-        assertEquals(6, RoleState.ALL_ROLES.size)
+        assertEquals(7, RoleState.ALL_ROLES.size)
     }
 }

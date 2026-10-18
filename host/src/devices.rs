@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::wire::{
-    ROLE_EXTEND, ROLE_INPUT_PAD, ROLE_MIRROR, ROLE_MIRROR_WINDOW, ROLE_PHONE_PRIMARY, ROLE_TABLET,
+    ROLE_EXTEND, ROLE_INPUT_PAD, ROLE_MIRROR, ROLE_MIRROR_WINDOW, ROLE_PHONE_PRIMARY, ROLE_SOUND_ONLY, ROLE_TABLET,
 };
 
 /// What a connected device is used for. The wire values are the `ROLE_*` constants.
@@ -30,16 +30,20 @@ pub enum Role {
     Tablet,
     /// No video; touchpad, keyboard and shortcut pad.
     InputPad,
+    /// No video and no input; the phone only plays the host's audio, so the
+    /// host does no capture or encoding for it.
+    SoundOnly,
 }
 
 impl Role {
-    pub const ALL: [Role; 6] = [
+    pub const ALL: [Role; 7] = [
         Role::Mirror,
         Role::Extend,
         Role::MirrorWindow,
         Role::PhonePrimary,
         Role::Tablet,
         Role::InputPad,
+        Role::SoundOnly,
     ];
 
     /// `None` for an unknown value (including `ROLE_UNSET`).
@@ -51,6 +55,7 @@ impl Role {
             ROLE_PHONE_PRIMARY => Role::PhonePrimary,
             ROLE_TABLET => Role::Tablet,
             ROLE_INPUT_PAD => Role::InputPad,
+            ROLE_SOUND_ONLY => Role::SoundOnly,
             _ => return None,
         })
     }
@@ -63,12 +68,13 @@ impl Role {
             Role::PhonePrimary => ROLE_PHONE_PRIMARY,
             Role::Tablet => ROLE_TABLET,
             Role::InputPad => ROLE_INPUT_PAD,
+            Role::SoundOnly => ROLE_SOUND_ONLY,
         }
     }
 
     /// Whether this role sends video to the phone.
     pub fn streams_video(self) -> bool {
-        !matches!(self, Role::Tablet | Role::InputPad)
+        !matches!(self, Role::Tablet | Role::InputPad | Role::SoundOnly)
     }
 
     pub fn label(self) -> &'static str {
@@ -79,6 +85,7 @@ impl Role {
             Role::PhonePrimary => "Phone as main screen",
             Role::Tablet => "Drawing tablet",
             Role::InputPad => "Input pad",
+            Role::SoundOnly => "Sound only",
         }
     }
 }
@@ -130,6 +137,8 @@ pub struct DeviceSettings {
     pub clipboard: bool,
     /// Lower fps/bitrate when the phone's battery is low or it runs hot (Phase 8).
     pub battery_saver: bool,
+    /// Scale the phone's monitor on the host to its screen density (KDE, GNOME).
+    pub auto_scale: bool,
     /// Picture quality versus bandwidth.
     pub video_quality: VideoQuality,
     /// Frame rate cap; 0 streams at the host's target rate.
@@ -147,6 +156,7 @@ impl Default for DeviceSettings {
             mic: false,
             clipboard: true,
             battery_saver: true,
+            auto_scale: true,
             video_quality: VideoQuality::Auto,
             max_fps: 0,
         }

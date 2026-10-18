@@ -16,6 +16,7 @@ Use your Android phones or tablets as a second monitor/speaker for your Linux PC
 - Laptop audio on the phone, phone microphone to the laptop, synced across devices
 - Clipboard sharing and file transfer
 - Phone battery on the host, per-device settings
+- Optional automatic screen scaling for the phone's monitor (KDE, GNOME); switch it off in the host or in the Android app settings
 
 ## Works fine on
 

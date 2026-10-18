@@ -117,6 +117,7 @@ class ClientUiState(val settings: AppSettings) {
     var autoReconnect by mutableStateOf(settings.autoReconnect)
     var palmRejection by mutableStateOf(settings.palmRejection)
     var strokePrediction by mutableStateOf(settings.strokePrediction)
+    var autoScale by mutableStateOf(settings.autoScale)
     var naturalScroll by mutableStateOf(settings.naturalScroll)
     var pointerSpeed by mutableStateOf(settings.pointerSpeed)
     var penButton1 by mutableStateOf(settings.penButton1)

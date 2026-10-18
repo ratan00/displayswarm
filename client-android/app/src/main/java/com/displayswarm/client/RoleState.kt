@@ -37,12 +37,13 @@ data class RoleState(
     companion object {
         val ALL_ROLES = intArrayOf(
             Wire.ROLE_MIRROR, Wire.ROLE_EXTEND, Wire.ROLE_MIRROR_WINDOW,
-            Wire.ROLE_PHONE_PRIMARY, Wire.ROLE_TABLET, Wire.ROLE_INPUT_PAD
+            Wire.ROLE_PHONE_PRIMARY, Wire.ROLE_TABLET, Wire.ROLE_INPUT_PAD,
+            Wire.ROLE_SOUND_ONLY
         )
 
         fun isValid(role: Int) = role in ALL_ROLES
 
-        fun hasVideo(role: Int) = role != Wire.ROLE_TABLET && role != Wire.ROLE_INPUT_PAD
+        fun hasVideo(role: Int) = role != Wire.ROLE_TABLET && role != Wire.ROLE_INPUT_PAD && role != Wire.ROLE_SOUND_ONLY
 
         fun label(role: Int): String = when (role) {
             Wire.ROLE_MIRROR -> "Mirror"
@@ -51,6 +52,7 @@ data class RoleState(
             Wire.ROLE_PHONE_PRIMARY -> "Phone as main screen"
             Wire.ROLE_TABLET -> "Drawing tablet"
             Wire.ROLE_INPUT_PAD -> "Input pad"
+            Wire.ROLE_SOUND_ONLY -> "Sound only"
             else -> "Unknown"
         }
 
@@ -61,6 +63,7 @@ data class RoleState(
             Wire.ROLE_PHONE_PRIMARY -> "Use this phone as the main screen"
             Wire.ROLE_TABLET -> "Pen and touch input only, no video"
             Wire.ROLE_INPUT_PAD -> "Touchpad and keyboard only, no video"
+            Wire.ROLE_SOUND_ONLY -> "Play the host's audio only; no video, lowest power use"
             else -> ""
         }
 
@@ -68,6 +71,7 @@ data class RoleState(
         fun hint(role: Int): String = when (role) {
             Wire.ROLE_TABLET -> "Drawing tablet\nDraw here; input goes to the host"
             Wire.ROLE_INPUT_PAD -> "Input pad\nMove and tap here to control the host"
+            Wire.ROLE_SOUND_ONLY -> "Sound only\nThe host's audio plays on this device"
             else -> ""
         }
     }

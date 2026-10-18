@@ -28,6 +28,7 @@ export struct DeviceRow {
     mic: bool,
     clipboard: bool,
     battery-saver: bool,
+    auto-scale: bool,
     panel-off: bool,
     // Only PhonePrimary has a panel to turn off.
     show-panel-off: bool,
@@ -586,6 +587,12 @@ component DeviceDetail inherits VerticalLayout {
             subtitle: "Lower frame rate and bitrate while the device is on battery.";
             checked: root.dev.battery-saver;
             toggled(v) => { root.toggle-setting(3, v); }
+        }
+        ToggleRow {
+            title: "Scale the screen to the device";
+            subtitle: "Sets the monitor's scale from the device's density (KDE, GNOME). Applies on the next connection.";
+            checked: root.dev.auto-scale;
+            toggled(v) => { root.toggle-setting(9, v); }
         }
         if root.dev.show-panel-off: ToggleRow {
             title: "Turn the laptop panel off";
