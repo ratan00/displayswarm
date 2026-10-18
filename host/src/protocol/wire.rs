@@ -206,6 +206,7 @@ pub const ROLE_MIRROR_WINDOW: u8 = 2;
 pub const ROLE_PHONE_PRIMARY: u8 = 3;
 pub const ROLE_TABLET: u8 = 4;
 pub const ROLE_INPUT_PAD: u8 = 5;
+pub const ROLE_SOUND_ONLY: u8 = 6;
 /// No role remembered for this device yet (only in `HelloAck`).
 pub const ROLE_UNSET: u8 = 0xFF;
 

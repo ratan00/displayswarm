@@ -205,6 +205,7 @@ impl Capabilities {
                     Availability::no("The screen-capture service cannot share a single window here.")
                 }
             }
+            Role::SoundOnly => Availability::Yes,
             Role::Tablet | Role::InputPad => {
                 if self.input_ok {
                     Availability::Yes
@@ -355,7 +356,8 @@ mod tests {
     #[test]
     fn every_refusal_carries_a_reason() {
         let c = Capabilities::unsupported(Desktop::Unknown, SessionType::Unknown);
-        for r in Role::ALL {
+        // Sound only needs nothing from the desktop.
+        for r in Role::ALL.into_iter().filter(|r| *r != Role::SoundOnly) {
             let a = c.role_support(r);
             assert!(!a.is_yes(), "{r:?}");
             assert!(!a.reason().unwrap().is_empty(), "{r:?}");

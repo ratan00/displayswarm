@@ -624,7 +624,7 @@ pub fn target_for(role: Role, record: &DeviceRecord, hello: &Hello) -> Option<Ca
             density_dpi: hello.density_dpi,
         }),
         Role::MirrorWindow => Some(CaptureTarget::Window),
-        Role::Tablet | Role::InputPad => None,
+        Role::Tablet | Role::InputPad | Role::SoundOnly => None,
     }
 }
 
@@ -635,7 +635,7 @@ pub fn token_key_for(device_id: &str, role: Role) -> String {
         Role::Mirror => "monitor",
         Role::Extend | Role::PhonePrimary => "virtual",
         Role::MirrorWindow => "window",
-        Role::Tablet | Role::InputPad => "input",
+        Role::Tablet | Role::InputPad | Role::SoundOnly => "input",
     };
     format!("{device_id}/{kind}")
 }
@@ -2620,7 +2620,7 @@ fn start_pipeline(
 ) -> std::io::Result<Option<Pipeline>> {
     let hello = Hello { width: panel.0, height: panel.1, ..env.hello.clone() };
     let Some(target) = target_for(role, record, &hello) else {
-        log::info!("Role {}: input only, no capture or video", role.label());
+        log::info!("Role {}: no capture or video", role.label());
         if role == Role::Tablet {
             // Blocking layout query (a few ms); the capture factory above is too.
             let region = (env.manager.backends.tablet_region)();

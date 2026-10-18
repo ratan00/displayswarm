@@ -149,6 +149,7 @@ object Wire {
     const val ROLE_PHONE_PRIMARY = 3
     const val ROLE_TABLET = 4
     const val ROLE_INPUT_PAD = 5
+    const val ROLE_SOUND_ONLY = 6
 
     /** HelloAck only: the host has no role remembered for this device; show the chooser. */
     const val ROLE_UNSET = 0xFF
