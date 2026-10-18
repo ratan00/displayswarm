@@ -514,7 +514,30 @@ impl SessionManager {
     /// `role == None`.
     fn touch_record(&self, device_id: &str, name: &str) -> DeviceRecord {
         let mut store = self.lock_store();
-        let mut rec = store.get(device_id).unwrap_or_else(|| DeviceRecord::new(device_id, name));
+        let mut rec = match store.get(device_id) {
+            Some(rec) => rec,
+            None => {
+                // The app gets a new id on every reinstall, so a device we have never
+                // seen under this name is most likely the old record's owner coming back:
+                // carry its role and options over instead of listing it twice.
+                let mut same_name: Vec<DeviceRecord> =
+                    store.all().into_iter().filter(|r| !name.is_empty() && r.name == name).collect();
+                same_name.sort_by_key(|r| r.last_seen);
+                let mut rec = DeviceRecord::new(device_id, name);
+                if let Some(old) = same_name.last() {
+                    rec.role = old.role;
+                    rec.target_output = old.target_output.clone();
+                    rec.panel_off = old.panel_off;
+                    rec.settings = old.settings.clone();
+                }
+                for old in &same_name {
+                    if let Err(e) = store.forget(&old.device_id) {
+                        log::warn!("Could not drop the old record {}: {e}", old.device_id);
+                    }
+                }
+                rec
+            }
+        };
         if !name.is_empty() {
             rec.name = name.to_string();
         }

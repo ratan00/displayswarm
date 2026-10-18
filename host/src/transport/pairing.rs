@@ -185,9 +185,12 @@ impl TrustStore {
         self.devices.iter().any(|d| d.device_id == device_id && ct_eq(d.token_hash.as_bytes(), want.as_bytes()))
     }
 
-    /// Trusts `device_id` with `token`, replacing an earlier pairing of it.
+    /// Trusts `device_id` with `token`, replacing an earlier pairing of it. The
+    /// app makes a new id whenever it is reinstalled or its data is cleared, so
+    /// an earlier pairing under the same device name is that device's old
+    /// install (its token is gone with it) and is dropped too.
     pub fn add(&mut self, device_id: &str, name: &str, token: &[u8]) -> io::Result<()> {
-        self.devices.retain(|d| d.device_id != device_id);
+        self.devices.retain(|d| d.device_id != device_id && (name.is_empty() || d.name != name));
         self.devices.push(TrustedDevice {
             device_id: device_id.into(),
             name: name.into(),

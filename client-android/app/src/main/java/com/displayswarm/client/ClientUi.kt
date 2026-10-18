@@ -2,7 +2,15 @@ package com.displayswarm.client
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.layout.offset
+import androidx.compose.material.icons.filled.DragHandle
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -97,6 +105,8 @@ class ClientUiState(val settings: AppSettings) {
     var manualHost by mutableStateOf(settings.lastHost.takeIf { it.isNotEmpty() && !it.contains(':') } ?: "127.0.0.1")
 
     var toolbarOpen by mutableStateOf(false)
+    var toolbarX by mutableStateOf(settings.toolbarX)
+    var toolbarY by mutableStateOf(settings.toolbarY)
     var settingsOpen by mutableStateOf(false)
     var shortcutsOpen by mutableStateOf(false)
     var macrosOpen by mutableStateOf(false)
@@ -191,8 +201,10 @@ fun ClientUi(state: ClientUiState, actions: ClientActions) {
                         Modifier.align(Alignment.BottomCenter).fillMaxWidth().fillMaxHeight(if (state.role.hasVideo) 0.4f else 0.45f)
                     )
                 }
-                EdgeHandle(state, Modifier.align(Alignment.CenterStart))
-                if (state.toolbarOpen) Toolbar(state, actions, Modifier.align(Alignment.CenterStart))
+                // One opener strip, on the side the toolbar was last left on.
+                val onRight = state.toolbarX > LocalConfiguration.current.screenWidthDp.dp.value * LocalDensity.current.density / 2f
+                EdgeHandle(state, Modifier.align(if (onRight) Alignment.CenterEnd else Alignment.CenterStart), rightEdge = onRight)
+                if (state.toolbarOpen) Toolbar(state, actions, Modifier.align(Alignment.TopStart))
             }
             if (state.chooserOpen) RoleChooser(state, actions)
         }
@@ -311,16 +323,18 @@ fun StatsHud(status: String, metrics: String, modifier: Modifier = Modifier) {
 // ---- Toolbar ----------------------------------------------------------------
 
 @Composable
-fun EdgeHandle(state: ClientUiState, modifier: Modifier = Modifier) {
-    // A thin strip on the left edge: swipe it inwards to open the toolbar.
+fun EdgeHandle(state: ClientUiState, modifier: Modifier = Modifier, rightEdge: Boolean = false) {
+    // A thin strip on the toolbar's side of the screen: swipe it inwards to open the toolbar where it was left.
     Box(
         modifier
             .fillMaxHeight(0.5f)
             .width(22.dp)
-            .pointerInput(Unit) {
-                detectHorizontalDragGestures { _, dx -> if (dx > 6f) state.toolbarOpen = true }
+            .pointerInput(rightEdge) {
+                detectHorizontalDragGestures { _, dx ->
+                    if (if (rightEdge) dx < -6f else dx > 6f) state.toolbarOpen = true
+                }
             },
-        contentAlignment = Alignment.CenterStart
+        contentAlignment = if (rightEdge) Alignment.CenterEnd else Alignment.CenterStart
     ) {
         Box(Modifier.width(4.dp).height(56.dp).background(Color(0x55FFFFFF), RoundedCornerShape(2.dp)))
     }
@@ -335,8 +349,16 @@ private fun ToolButton(icon: ImageVector, label: String, checked: Boolean = fals
 
 @Composable
 fun Toolbar(state: ClientUiState, actions: ClientActions, modifier: Modifier = Modifier) {
+    val density = LocalDensity.current
+    val config = LocalConfiguration.current
+    val screenW = with(density) { config.screenWidthDp.dp.toPx() }
+    val screenH = with(density) { config.screenHeightDp.dp.toPx() }
+    var size by remember { mutableStateOf(IntSize.Zero) }
+    // Unmoved: hug the left edge, vertically centred.
+    val x = (if (state.toolbarX < 0f) 0f else state.toolbarX).coerceIn(0f, (screenW - size.width).coerceAtLeast(0f))
+    val y = (if (state.toolbarY < 0f) (screenH - size.height) / 2f else state.toolbarY).coerceIn(0f, (screenH - size.height).coerceAtLeast(0f))
     Surface(
-        modifier.padding(8.dp),
+        modifier.offset { IntOffset(x.toInt(), y.toInt()) }.onSizeChanged { size = it }.padding(8.dp),
         shape = RoundedCornerShape(24.dp),
         color = Color(0xE61E1E2E)
     ) {
@@ -344,6 +366,20 @@ fun Toolbar(state: ClientUiState, actions: ClientActions, modifier: Modifier = M
             Modifier.padding(4.dp).verticalScroll(rememberScrollState()),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
+            // Grip: drag to put the toolbar anywhere on the screen; the spot is remembered.
+            Icon(
+                Icons.Filled.DragHandle, "Move toolbar", tint = Color(0xAAFFFFFF),
+                modifier = Modifier.padding(vertical = 8.dp).pointerInput(Unit) {
+                    detectDragGestures(
+                        onDragStart = { state.toolbarX = x; state.toolbarY = y },
+                        onDragEnd = { state.settings.toolbarX = state.toolbarX; state.settings.toolbarY = state.toolbarY }
+                    ) { change, drag ->
+                        change.consume()
+                        state.toolbarX = (state.toolbarX + drag.x).coerceIn(0f, (screenW - size.width).coerceAtLeast(0f))
+                        state.toolbarY = (state.toolbarY + drag.y).coerceIn(0f, (screenH - size.height).coerceAtLeast(0f))
+                    }
+                }
+            )
             ToolButton(Icons.Filled.Close, "Close toolbar") { state.toolbarOpen = false }
             ToolButton(Icons.Filled.Keyboard, "Keyboard") { actions.toggleKeyboard() }
             ToolButton(Icons.Filled.Apps, "Shortcuts", state.shortcutsOpen) { state.shortcutsOpen = !state.shortcutsOpen }

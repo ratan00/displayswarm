@@ -199,8 +199,10 @@ class AoaManager(
             } else {
                 PendingIntent.FLAG_UPDATE_CURRENT
             }
+            // Must stay mutable (the system fills in the device extras) but Android 14
+            // rejects a mutable PendingIntent around an implicit Intent, so pin the package.
             val permissionIntent = PendingIntent.getBroadcast(
-                context, 0, Intent(ACTION_USB_PERMISSION), flags
+                context, 0, Intent(ACTION_USB_PERMISSION).setPackage(context.packageName), flags
             )
             usbManager.requestPermission(acc, permissionIntent)
             onStatusChanged("Requesting USB AOA Permission...")

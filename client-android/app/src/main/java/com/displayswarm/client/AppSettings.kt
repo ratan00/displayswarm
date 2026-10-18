@@ -159,6 +159,8 @@ class AppSettings(private val store: SettingsStore) {
         const val KEY_PEN_BUTTON_2 = "pen_button_2"
         const val KEY_NATURAL_SCROLL = "natural_scroll"
         const val KEY_AUTO_SCALE = "auto_scale"
+        const val KEY_TOOLBAR_X = "toolbar_x"
+        const val KEY_TOOLBAR_Y = "toolbar_y"
         const val KEY_POINTER_SPEED = "pointer_speed"
         const val KEY_MACROS = "macros"
         const val KEY_LAST_HOST = "last_host"
@@ -212,7 +214,7 @@ class AppSettings(private val store: SettingsStore) {
         set(v) = set(KEY_ROTATION_LOCK, v)
 
     var showStats: Boolean
-        get() = store.getBoolean(KEY_SHOW_STATS, true)
+        get() = store.getBoolean(KEY_SHOW_STATS, false)
         set(v) = set(KEY_SHOW_STATS, v)
 
     var palmRejection: Boolean
@@ -238,6 +240,15 @@ class AppSettings(private val store: SettingsStore) {
     var autoScale: Boolean
         get() = store.getBoolean(KEY_AUTO_SCALE, true)
         set(v) = set(KEY_AUTO_SCALE, v)
+
+    /** Where the user dragged the toolbar to, in pixels from the top-left; negative = not moved yet (left edge, centred). */
+    var toolbarX: Float
+        get() = store.getFloat(KEY_TOOLBAR_X, -1f)
+        set(v) = set(KEY_TOOLBAR_X, v)
+
+    var toolbarY: Float
+        get() = store.getFloat(KEY_TOOLBAR_Y, -1f)
+        set(v) = set(KEY_TOOLBAR_Y, v)
 
     var naturalScroll: Boolean
         get() = store.getBoolean(KEY_NATURAL_SCROLL, true)
