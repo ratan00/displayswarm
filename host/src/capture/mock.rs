@@ -54,6 +54,7 @@ impl ScreenCapturer for MockCapturer {
             format: super::PixelFormat::Rgba,
             data: buffer,
             timestamp_us: now_us,
+            gpu: None,
         })
     }
 

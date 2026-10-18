@@ -36,6 +36,78 @@ pub struct Frame {
     pub format: PixelFormat,
     pub data: Vec<u8>, // RGBA or BGRA 32-bit
     pub timestamp_us: u64,
+    /// Zero-copy: the picture is still in GPU memory, at the source's own size
+    /// (`width`/`height` are the encoder's), and `data` is empty. Only sent
+    /// while [`gpu_frames_enabled`], i.e. to an encoder that imports it.
+    pub gpu: Option<std::sync::Arc<GpuFrame>>,
+}
+
+/// A captured frame left where the compositor rendered it: a single-plane
+/// DMA-BUF. The VA-API encoder imports it and scales and converts it on the
+/// GPU, so no pixel crosses the CPU (before: the CPU read every frame out of
+/// GPU memory, scaled it and converted it to NV12, then uploaded it again).
+#[derive(Debug)]
+pub struct GpuFrame {
+    #[cfg(unix)]
+    pub fd: std::os::fd::OwnedFd,
+    pub offset: u32,
+    /// Bytes per row.
+    pub stride: u32,
+    /// DRM format modifier (layout); 0 is linear.
+    pub modifier: u64,
+    /// DRM fourcc, e.g. XRGB8888 for BGRx.
+    pub drm_format: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+static GPU_FRAMES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether captures should hand over [`GpuFrame`]s: an encoder that can import
+/// them is running and its import works.
+pub fn gpu_frames_enabled() -> bool {
+    GPU_FRAMES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Set by the encoder: on when its GPU import is ready, off when it failed
+/// (captures then go back to CPU frames by themselves).
+pub fn set_gpu_frames(on: bool) {
+    GPU_FRAMES.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(target_os = "linux")]
+impl GpuFrame {
+    /// The pixels as a CPU copy (`stride * height` bytes), for when the GPU
+    /// path is off. Linear buffers only; `None` for tiled ones or on failure.
+    pub fn read_linear(&self) -> Option<Vec<u8>> {
+        use std::os::fd::AsRawFd;
+        if self.modifier != 0 {
+            return None;
+        }
+        let len = self.stride as usize * self.height as usize;
+        let map_len = self.offset as usize + len;
+        let fd = self.fd.as_raw_fd();
+        // DMA_BUF_IOCTL_SYNC: _IOW('b', 0, struct dma_buf_sync { u64 flags; })
+        const SYNC: libc::c_ulong = 0x4008_6200;
+        const SYNC_READ: u64 = 1;
+        const SYNC_START: u64 = 0;
+        const SYNC_END: u64 = 4;
+        // Safety: a read-only shared mapping of a dma-buf we hold an fd to,
+        // bracketed by the cache-coherency ioctls, unmapped before returning.
+        unsafe {
+            let p = libc::mmap(std::ptr::null_mut(), map_len, libc::PROT_READ, libc::MAP_SHARED, fd, 0);
+            if p == libc::MAP_FAILED {
+                return None;
+            }
+            let start: u64 = SYNC_START | SYNC_READ;
+            libc::ioctl(fd, SYNC, &start);
+            let out = std::slice::from_raw_parts((p as *const u8).add(self.offset as usize), len).to_vec();
+            let end: u64 = SYNC_END | SYNC_READ;
+            libc::ioctl(fd, SYNC, &end);
+            libc::munmap(p, map_len);
+            Some(out)
+        }
+    }
 }
 
 impl Frame {
@@ -47,6 +119,7 @@ impl Frame {
             format: PixelFormat::Rgba,
             data,
             timestamp_us,
+            gpu: None,
         }
     }
 
@@ -58,6 +131,7 @@ impl Frame {
             format: PixelFormat::Bgra,
             data,
             timestamp_us,
+            gpu: None,
         }
     }
 }
@@ -207,4 +281,30 @@ pub fn create_default_capturer(width: u32, height: u32) -> Box<dyn ScreenCapture
 
     // High performance synthetic test pattern fallback
     Box::new(mock::MockCapturer::new(width, height))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod gpu_frame_tests {
+    use super::*;
+    use std::os::fd::FromRawFd;
+
+    /// The CPU fallback reads a linear buffer row by row from its offset. A
+    /// memfd stands in for the dma-buf (the sync ioctl just fails on it).
+    #[test]
+    fn read_linear_copies_the_picture_from_its_offset() {
+        let (w, h, stride, offset) = (4u32, 3u32, 20u32, 8u32);
+        let len = (offset + stride * h) as usize;
+        let bytes: Vec<u8> = (0..len).map(|i| i as u8).collect();
+        // Safety: a fresh memfd we own.
+        let fd = unsafe {
+            let fd = libc::memfd_create(c"gpu-frame-test".as_ptr(), 0);
+            assert!(fd >= 0);
+            assert_eq!(libc::write(fd, bytes.as_ptr() as *const _, len), len as isize);
+            std::os::fd::OwnedFd::from_raw_fd(fd)
+        };
+        let g = GpuFrame { fd, offset, stride, modifier: 0, drm_format: 0x3432_5258, width: w, height: h };
+        assert_eq!(g.read_linear().unwrap(), bytes[offset as usize..].to_vec());
+        let tiled = GpuFrame { modifier: 1 << 56, ..g };
+        assert!(tiled.read_linear().is_none(), "tiled layouts are not readable linearly");
+    }
 }

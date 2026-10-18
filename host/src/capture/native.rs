@@ -36,6 +36,8 @@ pub struct RawFrame {
     pub stride: usize,
     pub format: HostPixelFormat,
     pub timestamp_us: u64,
+    /// Zero-copy: the frame is a DMA-BUF and `data` is empty.
+    pub gpu: Option<Arc<crate::capture::GpuFrame>>,
 }
 
 pub fn frame_channel() -> (cb::Sender<RawFrame>, cb::Receiver<RawFrame>) {
@@ -347,10 +349,14 @@ pub fn start_screencast_request(
             // formats" / "error alloc buffers"), while mutter crashed on ranges.
             let drive_graph = desktop != crate::display::model::Desktop::Cosmic;
             let use_dmabuf = std::env::var("DISPLAYSWARM_DMABUF").map(|v| !(v == "0" || v.eq_ignore_ascii_case("false"))).unwrap_or(true);
+            // Zero-copy: hand DMA-BUFs over as fds when the encoder imports them.
+            let passthrough = use_dmabuf && crate::capture::gpu_frames_enabled();
+            log::info!("native capture: DMA-BUF {}", if passthrough { "zero-copy (GPU import)" } else if use_dmabuf { "mapped and copied" } else { "off" });
             let mut cfg = PipeWireConfig::builder()
                 .buffer_count(3)
                 .preferred_format(PixelFormat::BGRA)
                 .use_dmabuf(use_dmabuf)
+                .dmabuf_passthrough(passthrough)
                 .drive_graph(drive_graph)
                 .ranged_buffers(desktop != crate::display::model::Desktop::Gnome);
             if let Some(m) = virtual_mode {
@@ -432,19 +438,39 @@ pub fn start_screencast_request(
                                 };
                                 // No pixel copy on the memory path: the Arc that
                                 // PipeWire's frame holds is shared with the
-                                // consumer. Only true DMA-BUF frames need
-                                // `clone_data` (empty for un-mmappable ones).
+                                // consumer. DMA-BUF frames only arrive with
+                                // passthrough on, and travel as their fd.
+                                let mut gpu = None;
                                 let data: Option<Arc<Vec<u8>>> = if frame.is_dmabuf() {
                                     dmabuf_count += 1;
-                                    if dmabuf_count <= 3 || dmabuf_count % 300 == 0 {
-                                        log::warn!(
-                                            "native capture: DMA-BUF frame #{} ({}x{}, {} bytes est) — \
-                                             extracting via clone_data",
-                                            dmabuf_count, frame.width, frame.height, frame.data_size()
-                                        );
+                                    let (w, h) = (frame.width, frame.height);
+                                    match frame.buffer {
+                                        lamco_pipewire::frame::FrameBuffer::DmaBuf(desc) if desc.planes.len() == 1 => {
+                                            let plane = desc.planes.into_iter().next().unwrap();
+                                            if dmabuf_count <= 3 {
+                                                log::info!(
+                                                    "native capture: zero-copy DMA-BUF {}x{} fourcc {:#x} modifier {:#x} stride {}",
+                                                    w, h, desc.drm_format, desc.modifier, plane.stride
+                                                );
+                                            }
+                                            gpu = Some(Arc::new(crate::capture::GpuFrame {
+                                                fd: plane.fd,
+                                                offset: plane.offset,
+                                                stride: plane.stride,
+                                                modifier: desc.modifier,
+                                                drm_format: desc.drm_format,
+                                                width: w,
+                                                height: h,
+                                            }));
+                                            Some(Arc::new(Vec::new()))
+                                        }
+                                        _ => {
+                                            if dmabuf_count <= 3 {
+                                                log::warn!("native capture: multi-plane DMA-BUF is not supported; frame dropped");
+                                            }
+                                            None
+                                        }
                                     }
-                                    let d = frame.clone_data();
-                                    if d.is_empty() { None } else { Some(Arc::new(d)) }
                                 } else {
                                     memory_count += 1;
                                     frame.data().cloned()
@@ -461,6 +487,7 @@ pub fn start_screencast_request(
                                         },
                                         format,
                                         timestamp_us: stamp,
+                                        gpu,
                                     };
                                     match frame_tx.try_send(raw) {
                                         Ok(()) => { send_ok += 1; }

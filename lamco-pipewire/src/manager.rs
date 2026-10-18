@@ -322,6 +322,7 @@ impl PipeWireManager {
             .with_drive_graph(self.config.drive_graph)
             .with_ranged_buffers(self.config.ranged_buffers)
             .with_dmabuf(self.config.use_dmabuf)
+            .with_dmabuf_passthrough(self.config.dmabuf_passthrough)
             .with_buffer_count(self.config.buffer_count);
 
         // Create frame channel — receiver stored for consumer via frame_receiver()

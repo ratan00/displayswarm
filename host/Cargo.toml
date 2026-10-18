@@ -38,7 +38,7 @@ xcap = "0.9.8"
 # x264, and SIMD RGB->YUV conversion for the CPU paths. Optional (feature `encoders`,
 # on by default) so `cargo check --target x86_64-pc-windows-msvc --no-default-features`
 # works without the native ffmpeg/x264 libraries.
-ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format"], optional = true }
+ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "filter"], optional = true }
 x264-sys = { version = "0.2", optional = true }
 yuvutils-rs = { version = "0.8", optional = true }
 

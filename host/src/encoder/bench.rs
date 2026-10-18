@@ -64,6 +64,7 @@ fn frames(width: usize, height: usize, n: usize) -> Vec<Frame> {
                 format: PixelFormat::Rgba,
                 data: page[start..start + width * height * 4].to_vec(),
                 timestamp_us: 1_000_000 + i as u64 * 16_667,
+                gpu: None,
             }
         })
         .collect()

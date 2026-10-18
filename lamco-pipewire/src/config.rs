@@ -212,6 +212,7 @@ pub struct PipeWireConfigBuilder {
     buffer_count: Option<u32>,
     preferred_format: Option<PixelFormat>,
     use_dmabuf: Option<bool>,
+    dmabuf_passthrough: Option<bool>,
     drive_graph: Option<bool>,
     ranged_buffers: Option<bool>,
     max_streams: Option<usize>,
@@ -274,6 +275,14 @@ impl PipeWireConfigBuilder {
     #[must_use]
     pub fn use_dmabuf(mut self, enable: bool) -> Self {
         self.use_dmabuf = Some(enable);
+        self
+    }
+
+    /// Hand DMA-BUF frames over as file descriptors ([`crate::frame::FrameBuffer::DmaBuf`])
+    /// instead of mapping and copying them, for consumers that import them on the GPU.
+    #[must_use]
+    pub fn dmabuf_passthrough(mut self, enable: bool) -> Self {
+        self.dmabuf_passthrough = Some(enable);
         self
     }
 
@@ -353,7 +362,7 @@ impl PipeWireConfigBuilder {
             use_dmabuf: self.use_dmabuf.unwrap_or(defaults.use_dmabuf),
             drive_graph: self.drive_graph.unwrap_or(defaults.drive_graph),
             ranged_buffers: self.ranged_buffers.unwrap_or(defaults.ranged_buffers),
-            dmabuf_passthrough: defaults.dmabuf_passthrough,
+            dmabuf_passthrough: self.dmabuf_passthrough.unwrap_or(defaults.dmabuf_passthrough),
             max_streams: self.max_streams.unwrap_or(defaults.max_streams),
             frame_buffer_size: self.frame_buffer_size.unwrap_or(defaults.frame_buffer_size),
             enable_cursor: self.enable_cursor.unwrap_or(defaults.enable_cursor),

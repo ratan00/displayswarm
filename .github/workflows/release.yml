@@ -20,7 +20,7 @@ jobs:
       - run: |
           apt-get update
           apt-get install -y build-essential curl pkg-config clang libclang-dev dpkg-dev \
-            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libx264-dev \
+            libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libswscale-dev libx264-dev \
             libpipewire-0.3-dev libopus-dev libxcb1-dev libx11-dev libfontconfig-dev \
             libgbm-dev libxkbcommon-dev libwayland-dev libudev-dev libssl-dev \
             libegl-dev
@@ -58,7 +58,7 @@ jobs:
       - run: |
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config clang libclang-dev libfuse2t64 \
-            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libx264-dev \
+            libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev libswscale-dev libx264-dev \
             libpipewire-0.3-dev libopus-dev libxcb1-dev libx11-dev libfontconfig-dev \
             libgbm-dev libxkbcommon-dev libwayland-dev libudev-dev libssl-dev \
             libegl-dev

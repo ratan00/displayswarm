@@ -1700,9 +1700,10 @@ fn create_stream_on_thread(
                                                     offset: offset as u32,
                                                     stride: chunk_stride as u32,
                                                 }],
-                                                // DRM format from negotiated pixel format
+                                                // DRM format of what was actually negotiated
+                                                // (not the preference: BGRx is offered as BGRA).
                                                 drm_format: crate::ffi::spa_video_format_to_drm_fourcc(
-                                                    config.preferred_format.unwrap_or(PixelFormat::BGRx).to_spa(),
+                                                    negotiated_pixel_format(&proc_neg_format, config.preferred_format).to_spa(),
                                                 ),
                                                 modifier: negotiated_mod,
                                                 width: proc_neg_width.load(Ordering::Acquire),

@@ -680,6 +680,7 @@ impl X11Capturer {
             format: self.pixel_format,
             data: out_buffer,
             timestamp_us: now_us,
+            gpu: None,
         })
     }
 
@@ -1375,6 +1376,14 @@ impl NativePortalCapturer {
         Ok(newest)
     }
 
+    /// A CPU copy of a zero-copy frame's pixels (the frame then carries no
+    /// GPU buffer any more); `None` if it cannot be read.
+    fn read_back(raw: &mut native::RawFrame) -> Option<Vec<u8>> {
+        let gpu = raw.gpu.take()?;
+        raw.stride = gpu.stride as usize;
+        gpu.read_linear()
+    }
+
     /// Whether `raw`'s buffer really holds the `width`x`height` picture it
     /// claims. A short buffer must never reach the scaler.
     fn frame_is_sane(raw: &native::RawFrame) -> bool {
@@ -1432,6 +1441,7 @@ impl NativePortalCapturer {
             format: raw.format,
             data,
             timestamp_us,
+            gpu: None,
         }
     }
 
@@ -1453,6 +1463,7 @@ impl NativePortalCapturer {
             format: PixelFormat::Rgba,
             data,
             timestamp_us: host_monotonic_us(),
+            gpu: None,
         }
     }
 
@@ -1487,9 +1498,25 @@ impl ScreenCapturer for NativePortalCapturer {
         &mut self,
         timeout: Duration,
     ) -> Result<Option<Frame>, Box<dyn std::error::Error + Send + Sync>> {
-        let Some(raw) = self.poll_newest(timeout)? else {
+        let Some(mut raw) = self.poll_newest(timeout)? else {
             return Ok(None);
         };
+        if let Some(gpu) = raw.gpu.clone() {
+            // Zero-copy: the encoder scales and converts it on the GPU.
+            if crate::capture::gpu_frames_enabled() {
+                return Ok(Some(Frame {
+                    width: self.target_width,
+                    height: self.target_height,
+                    format: raw.format,
+                    data: Vec::new(),
+                    timestamp_us: raw.timestamp_us,
+                    gpu: Some(gpu),
+                }));
+            }
+            // The GPU path was switched off after the stream started: read it back.
+            let Some(data) = Self::read_back(&mut raw) else { return Ok(None) };
+            raw.data = Arc::new(data);
+        }
         if !Self::frame_is_sane(&raw) {
             log::warn!(
                 "native screencast: discarding a {}-byte frame that does not hold the \
@@ -1523,7 +1550,14 @@ impl ScreenCapturer for NativePortalCapturer {
     fn capture_frame(&mut self) -> Result<Frame, Box<dyn std::error::Error + Send + Sync>> {
         let fresh = self.poll_newest(FRAME_POLL_TIMEOUT)?;
         let fresh_frame = fresh.is_some();
-        if let Some(raw) = fresh {
+        if let Some(mut raw) = fresh {
+            // This legacy path replays frames, so it always keeps a CPU copy.
+            if raw.gpu.is_some() {
+                match Self::read_back(&mut raw) {
+                    Some(data) => raw.data = Arc::new(data),
+                    None => return Ok(self.placeholder_frame()),
+                }
+            }
             self.latest = Some(raw);
         }
 
@@ -1914,6 +1948,7 @@ impl PipeWirePortalCapturer {
                 format: PixelFormat::Rgba,
                 data: scaled_buffer,
                 timestamp_us: now_us,
+                gpu: None,
             });
         }
 
@@ -1949,6 +1984,7 @@ impl PipeWirePortalCapturer {
             format: PixelFormat::Rgba,
             data: buffer,
             timestamp_us: now_us,
+            gpu: None,
         })
     }
 }
@@ -2768,6 +2804,7 @@ mod tests {
             stride: (w * 4) as usize,
             format,
             timestamp_us: ts,
+            gpu: None,
         }
     }
 
@@ -2928,6 +2965,7 @@ mod tests {
                 stride: 32,
                 format: PixelFormat::Bgra,
                 timestamp_us: 1,
+                gpu: None,
             })
             .unwrap();
         let f = cap.next_frame(Duration::from_millis(100)).unwrap().expect("frame");

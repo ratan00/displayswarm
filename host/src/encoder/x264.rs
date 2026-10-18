@@ -148,6 +148,12 @@ impl Drop for X264Encoder {
 
 impl VideoEncoder for X264Encoder {
     fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedPacket>, BoxError> {
+        if frame.gpu.is_some() {
+            // A GPU frame meant for a VA-API encoder (another session's); this
+            // one cannot import it. The capture switches back to CPU frames.
+            crate::capture::set_gpu_frames(false);
+            return Ok(Vec::new());
+        }
         check_frame(frame, self.width, self.height)?;
         convert::to_nv12(frame.format, &frame.data, self.width as usize, self.height as usize, &mut self.nv12)?;
 
@@ -233,7 +239,7 @@ mod tests {
         for px in data.chunks_exact_mut(4) {
             px[3] = 255;
         }
-        Frame { width: w, height: h, format: PixelFormat::Rgba, data, timestamp_us: ts }
+        Frame { width: w, height: h, format: PixelFormat::Rgba, data, timestamp_us: ts, gpu: None }
     }
 
     #[test]

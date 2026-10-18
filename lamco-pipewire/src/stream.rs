@@ -102,6 +102,12 @@ impl StreamConfig {
         self
     }
 
+    /// Forward DMA-BUF frames as descriptors instead of CPU copies
+    pub fn with_dmabuf_passthrough(mut self, enable: bool) -> Self {
+        self.dmabuf_passthrough = enable;
+        self
+    }
+
     /// Set buffer count
     pub fn with_buffer_count(mut self, count: u32) -> Self {
         self.buffer_count = count;

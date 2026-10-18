@@ -30,7 +30,7 @@ pub const HW_BACKENDS: &[&str] = &["h264_nvenc", "h264_qsv", "h264_amf", "h264_m
 
 const VAAPI_COMPRESSION_LEVEL: i32 = 4;
 
-fn av_err(code: c_int) -> String {
+pub(super) fn av_err(code: c_int) -> String {
     let mut buf = [0i8; 128];
     // Safety: buf is a valid writable buffer of the stated size.
     unsafe { av_strerror(code, buf.as_mut_ptr(), buf.len()) };
@@ -316,7 +316,32 @@ impl Inner {
                 avcodec_send_frame(self.ctx, hf)
             };
             check(send, "send frame")?;
+            self.receive_packets()
+        }
+    }
 
+    /// Encodes a picture already in a VA surface (zero-copy capture).
+    #[cfg(target_os = "linux")]
+    fn encode_surface(&mut self, surface: *mut AVFrame, pts: i64, force_idr: bool) -> Result<Vec<(Vec<u8>, bool)>, BoxError> {
+        // Safety: `surface` is a live VA-API frame on this encoder's VADisplay.
+        unsafe {
+            let f = &mut *surface;
+            f.pts = pts;
+            f.pict_type = if force_idr { AVPictureType::AV_PICTURE_TYPE_I } else { AVPictureType::AV_PICTURE_TYPE_NONE };
+            f.color_range = (*self.ctx).color_range;
+            f.colorspace = (*self.ctx).colorspace;
+            f.color_primaries = (*self.ctx).color_primaries;
+            f.color_trc = (*self.ctx).color_trc;
+            check(avcodec_send_frame(self.ctx, surface), "send frame")?;
+            self.receive_packets()
+        }
+    }
+
+    /// Whatever the encoder has ready. With `async_depth=1` and no B-frames
+    /// this is exactly one packet per frame.
+    fn receive_packets(&mut self) -> Result<Vec<(Vec<u8>, bool)>, BoxError> {
+        // Safety: ctx and pkt are live; packet data is copied before unref.
+        unsafe {
             let mut out = Vec::with_capacity(1);
             loop {
                 let r = avcodec_receive_packet(self.ctx, self.pkt);
@@ -356,6 +381,13 @@ pub struct FfmpegEncoder {
     last_pts: i64,
     /// Bitrate to apply at the next IDR (ffmpeg cannot change it on an open context).
     pending_bitrate: Option<u32>,
+    /// Zero-copy importer for DMA-BUF frames, built on the first one.
+    #[cfg(target_os = "linux")]
+    zc: Option<super::zerocopy::VaapiImport>,
+    /// Bumped whenever `inner` is reopened: the importer must follow its device.
+    inner_gen: u64,
+    #[cfg(target_os = "linux")]
+    zc_gen: u64,
 }
 
 // Safety: the codec context and buffers are owned exclusively by this struct and
@@ -419,6 +451,13 @@ impl FfmpegEncoder {
                         );
                         let mut packetizer = Packetizer::default();
                         packetizer.set_config(&inner.extradata());
+                        #[cfg(target_os = "linux")]
+                        if codec == "h264_vaapi" {
+                            let wanted = std::env::var("DISPLAYSWARM_ZEROCOPY").map(|v| v != "0").unwrap_or(true);
+                            let ok = wanted && super::zerocopy::VaapiImport::supported(inner.hw_device, &render_node(&device));
+                            crate::capture::set_gpu_frames(ok);
+                            log::info!("{codec}: zero-copy capture {}", if ok { "on" } else if wanted { "unavailable (no DRM device)" } else { "off (DISPLAYSWARM_ZEROCOPY=0)" });
+                        }
                         return Ok(Self {
                             cfg,
                             inner,
@@ -427,6 +466,11 @@ impl FfmpegEncoder {
                             idr: IdrScheduler::new(),
                             last_pts: -1,
                             pending_bitrate: None,
+                            #[cfg(target_os = "linux")]
+                            zc: None,
+                            inner_gen: 0,
+                            #[cfg(target_os = "linux")]
+                            zc_gen: 0,
                         });
                     }
                     Err(e) => {
@@ -441,27 +485,97 @@ impl FfmpegEncoder {
     }
 }
 
-impl VideoEncoder for FfmpegEncoder {
-    fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedPacket>, BoxError> {
-        check_frame(frame, self.cfg.width, self.cfg.height)?;
-        let want_idr = self.idr.is_due(frame.timestamp_us);
+/// The render node the VA-API device was opened on (ffmpeg's default when none was named).
+#[cfg(target_os = "linux")]
+fn render_node(device: &Option<String>) -> String {
+    device.clone().unwrap_or_else(|| "/dev/dri/renderD128".into())
+}
 
-        // A bitrate change reinitialises the context; do it only on a frame that is
-        // an IDR anyway so the stream never sees a surprise keyframe.
-        if want_idr {
-            if let Some(kbps) = self.pending_bitrate.take() {
-                let mut cfg = self.cfg.clone();
-                cfg.bitrate_kbps = kbps;
-                match Inner::open(&cfg) {
-                    Ok(inner) => {
-                        log::info!("{}: bitrate {} -> {} kbps (reinitialised at IDR)", cfg.codec, self.cfg.bitrate_kbps, kbps);
-                        self.inner = inner;
-                        self.cfg = cfg;
-                    }
-                    Err(e) => log::warn!("{}: bitrate reinit failed, keeping old context: {}", cfg.codec, e),
+impl FfmpegEncoder {
+    /// A bitrate change reinitialises the context; do it only on a frame that is
+    /// an IDR anyway so the stream never sees a surprise keyframe.
+    fn apply_pending_bitrate(&mut self, want_idr: bool) {
+        if !want_idr {
+            return;
+        }
+        if let Some(kbps) = self.pending_bitrate.take() {
+            let mut cfg = self.cfg.clone();
+            cfg.bitrate_kbps = kbps;
+            match Inner::open(&cfg) {
+                Ok(inner) => {
+                    log::info!("{}: bitrate {} -> {} kbps (reinitialised at IDR)", cfg.codec, self.cfg.bitrate_kbps, kbps);
+                    self.inner = inner;
+                    self.cfg = cfg;
+                    self.inner_gen += 1;
+                }
+                Err(e) => log::warn!("{}: bitrate reinit failed, keeping old context: {}", cfg.codec, e),
+            }
+        }
+    }
+
+    fn packets(&mut self, out: Vec<(Vec<u8>, bool)>, timestamp_us: u64) -> Vec<EncodedPacket> {
+        let mut packets = Vec::with_capacity(2);
+        for (data, is_key) in out {
+            if is_key {
+                self.idr.mark_idr(timestamp_us);
+            }
+            packets.extend(self.packetizer.packetize(data, is_key, timestamp_us));
+        }
+        packets
+    }
+
+    /// Zero-copy: the frame is a DMA-BUF; the GPU scales, converts and encodes
+    /// it. Any failure turns GPU frames off for good, and the capture goes back
+    /// to CPU frames by itself (this frame is skipped).
+    #[cfg(target_os = "linux")]
+    fn encode_gpu(&mut self, frame: &Frame, g: &crate::capture::GpuFrame) -> Result<Vec<EncodedPacket>, BoxError> {
+        if self.cfg.codec != "h264_vaapi" || self.inner.hw_device.is_null() {
+            crate::capture::set_gpu_frames(false);
+            return Ok(Vec::new());
+        }
+        let want_idr = self.idr.is_due(frame.timestamp_us);
+        self.apply_pending_bitrate(want_idr);
+        if self.zc.as_ref().is_some_and(|z| !z.matches(g) || self.zc_gen != self.inner_gen) {
+            self.zc = None;
+        }
+        if self.zc.is_none() {
+            match super::zerocopy::VaapiImport::new(self.inner.hw_device, &render_node(&self.cfg.device), g, self.cfg.width, self.cfg.height) {
+                Ok(z) => {
+                    self.zc = Some(z);
+                    self.zc_gen = self.inner_gen;
+                }
+                Err(e) => {
+                    log::warn!("{}: zero-copy capture unavailable ({e}); using CPU frames", self.cfg.codec);
+                    crate::capture::set_gpu_frames(false);
+                    return Ok(Vec::new());
                 }
             }
         }
+        let surface = match self.zc.as_mut().unwrap().process(g) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("{}: zero-copy frame failed ({e}); using CPU frames", self.cfg.codec);
+                self.zc = None;
+                crate::capture::set_gpu_frames(false);
+                return Ok(Vec::new());
+            }
+        };
+        let pts = (frame.timestamp_us as i64).max(self.last_pts + 1);
+        self.last_pts = pts;
+        let out = self.inner.encode_surface(surface, pts, want_idr)?;
+        Ok(self.packets(out, frame.timestamp_us))
+    }
+}
+
+impl VideoEncoder for FfmpegEncoder {
+    fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedPacket>, BoxError> {
+        #[cfg(target_os = "linux")]
+        if let Some(g) = frame.gpu.clone() {
+            return self.encode_gpu(frame, &g);
+        }
+        check_frame(frame, self.cfg.width, self.cfg.height)?;
+        let want_idr = self.idr.is_due(frame.timestamp_us);
+        self.apply_pending_bitrate(want_idr);
 
         convert::to_nv12(
             frame.format,
@@ -477,15 +591,7 @@ impl VideoEncoder for FfmpegEncoder {
 
         let cfg = self.cfg.clone();
         let out = self.inner.encode(&cfg, &mut self.nv12, pts, want_idr)?;
-
-        let mut packets = Vec::with_capacity(2);
-        for (data, is_key) in out {
-            if is_key {
-                self.idr.mark_idr(frame.timestamp_us);
-            }
-            packets.extend(self.packetizer.packetize(data, is_key, frame.timestamp_us));
-        }
-        Ok(packets)
+        Ok(self.packets(out, frame.timestamp_us))
     }
 
     fn request_keyframe(&mut self) {

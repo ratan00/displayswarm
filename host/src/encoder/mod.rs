@@ -10,6 +10,8 @@ pub mod ffmpeg;
 pub mod stream;
 #[cfg(feature = "encoders")]
 pub mod x264;
+#[cfg(all(feature = "encoders", target_os = "linux"))]
+pub mod zerocopy;
 
 #[cfg(all(test, feature = "encoders"))]
 mod bench;

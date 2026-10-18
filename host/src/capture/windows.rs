@@ -247,11 +247,11 @@ impl WindowsCapturer {
     fn fit(&mut self, raw: RawFrame) -> Frame {
         let ts = host_monotonic_us();
         if raw.width == self.out_w && raw.height == self.out_h {
-            return Frame { width: raw.width, height: raw.height, format: PixelFormat::Bgra, data: raw.data, timestamp_us: ts };
+            return Frame { width: raw.width, height: raw.height, format: PixelFormat::Bgra, data: raw.data, timestamp_us: ts, gpu: None };
         }
         let mut data = vec![0u8; self.out_w as usize * self.out_h as usize * 4];
         self.scaler.scale(&raw.data, raw.width, raw.height, raw.width as usize * 4, &mut data, self.out_w, self.out_h);
-        Frame { width: self.out_w, height: self.out_h, format: PixelFormat::Bgra, data, timestamp_us: ts }
+        Frame { width: self.out_w, height: self.out_h, format: PixelFormat::Bgra, data, timestamp_us: ts, gpu: None }
     }
 }
 
@@ -269,6 +269,7 @@ impl ScreenCapturer for WindowsCapturer {
                 format: PixelFormat::Bgra,
                 data: vec![0; self.out_w as usize * self.out_h as usize * 4],
                 timestamp_us: host_monotonic_us(),
+                gpu: None,
             }),
         }
     }
