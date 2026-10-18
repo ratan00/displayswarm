@@ -190,8 +190,8 @@ fun ClientUi(state: ClientUiState, actions: ClientActions) {
                         Modifier.align(Alignment.BottomCenter).fillMaxWidth().fillMaxHeight(if (state.role.hasVideo) 0.4f else 0.45f)
                     )
                 }
-                EdgeHandle(state, Modifier.align(Alignment.CenterEnd))
-                if (state.toolbarOpen) Toolbar(state, actions, Modifier.align(Alignment.CenterEnd))
+                EdgeHandle(state, Modifier.align(Alignment.CenterStart))
+                if (state.toolbarOpen) Toolbar(state, actions, Modifier.align(Alignment.CenterStart))
             }
             if (state.chooserOpen) RoleChooser(state, actions)
         }
@@ -311,15 +311,15 @@ fun StatsHud(status: String, metrics: String, modifier: Modifier = Modifier) {
 
 @Composable
 fun EdgeHandle(state: ClientUiState, modifier: Modifier = Modifier) {
-    // A thin strip on the right edge: swipe it inwards to open the toolbar.
+    // A thin strip on the left edge: swipe it inwards to open the toolbar.
     Box(
         modifier
             .fillMaxHeight(0.5f)
             .width(22.dp)
             .pointerInput(Unit) {
-                detectHorizontalDragGestures { _, dx -> if (dx < -6f) state.toolbarOpen = true }
+                detectHorizontalDragGestures { _, dx -> if (dx > 6f) state.toolbarOpen = true }
             },
-        contentAlignment = Alignment.CenterEnd
+        contentAlignment = Alignment.CenterStart
     ) {
         Box(Modifier.width(4.dp).height(56.dp).background(Color(0x55FFFFFF), RoundedCornerShape(2.dp)))
     }
@@ -373,10 +373,10 @@ fun Toolbar(state: ClientUiState, actions: ClientActions, modifier: Modifier = M
 
 // ---- Shortcut bar -----------------------------------------------------------
 
+// Copy/Paste/Undo/Alt+Tab/Super live in the macro pad and the modifier chips; only keys they lack are here.
 internal val SHORTCUT_KEYS = listOf(
-    "Esc" to "esc", "Enter" to "enter", "Tab" to "tab", "Del" to "delete", "Copy" to "ctrl+c", "Paste" to "ctrl+v",
-    "Cut" to "ctrl+x", "Undo" to "ctrl+z", "Redo" to "ctrl+shift+z", "Alt+Tab" to "alt+tab", "Super" to "super",
-    "F1" to "f1", "F2" to "f2", "F3" to "f3", "F4" to "f4", "F5" to "f5"
+    "Esc" to "esc", "Enter" to "enter", "Tab" to "tab", "Del" to "delete",
+    "←" to "left", "↑" to "up", "↓" to "down", "→" to "right"
 )
 
 // ---- Macro pad --------------------------------------------------------------
