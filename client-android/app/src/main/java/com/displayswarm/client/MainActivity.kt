@@ -207,8 +207,9 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback, ClientActions 
         val rotation = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) display?.rotation ?: 0 else 0
         panelSentW = displayWidth
         panelSentH = displayHeight
+        val (w, h) = VideoDecoder.decodableSize(displayWidth, displayHeight)
         inputManager?.send(
-            Wire.Message.Resize(displayWidth, displayHeight, reportedDensityDpi(), rotation)
+            Wire.Message.Resize(w, h, reportedDensityDpi(), rotation)
         )
     }
 
@@ -563,9 +564,10 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback, ClientActions 
         }
         panelSentW = displayWidth
         panelSentH = displayHeight
+        val (helloW, helloH) = VideoDecoder.decodableSize(displayWidth, displayHeight)
         return Wire.Hello(
-            width = displayWidth,
-            height = displayHeight,
+            width = helloW,
+            height = helloH,
             refreshMhz = displayRefreshMhz,
             densityDpi = reportedDensityDpi(),
             codecs = Wire.CODEC_H264 or (if (hasHevcDecoder()) Wire.CODEC_HEVC else 0),

@@ -58,6 +58,35 @@ class VideoDecoder(surface: Surface) {
         private const val MIME_HEVC = "video/hevc"
 
         /**
+         * The size to ask the host to stream: [width]x[height] if this phone's H.264
+         * decoder takes it, else the largest 16-aligned size of the same shape that it
+         * does. Some phones have a 1080p-class decoder behind a bigger panel, and
+         * configure() on it fails, which leaves a black screen.
+         */
+        fun decodableSize(width: Int, height: Int): Pair<Int, Int> = try {
+            // Only the decoder createDecoderByType() picks (the first listed) counts: the
+            // software one further down takes 4K, but it is not the one that gets used.
+            val caps = android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS).codecInfos
+                .firstOrNull { !it.isEncoder && MIME_H264 in it.supportedTypes }
+                ?.getCapabilitiesForType(MIME_H264)?.videoCapabilities
+            shrinkToFit(width, height) { w, h -> caps == null || caps.isSizeSupported(w, h) }
+        } catch (_: Exception) {
+            width to height
+        }
+
+        internal fun shrinkToFit(width: Int, height: Int, supported: (Int, Int) -> Boolean): Pair<Int, Int> {
+            if (width <= 0 || height <= 0 || supported(width, height)) return width to height
+            var scale = 0.95
+            while (scale > 0.2) {
+                val w = (width * scale).toInt() / 16 * 16
+                val h = (height * scale).toInt() / 16 * 16
+                if (w > 0 && h > 0 && supported(w, h)) return w to h
+                scale -= 0.05
+            }
+            return width to height
+        }
+
+        /**
          * The codec of an Annex-B CONFIG packet, from its first NAL header: H.264
          * starts with an SPS (type 7 in the low 5 bits), HEVC with a VPS (type 32
          * in bits 1..6). The two cannot be confused: an HEVC first byte is 0x40,
@@ -194,8 +223,12 @@ class VideoDecoder(surface: Surface) {
             return
         }
 
-        val alignedW = width and 0x7FFFFFFE // round down to even
-        val alignedH = height and 0x7FFFFFFE
+        // Callers pass the panel size; past the decoder's limit configure() fails with
+        // ERROR_UNSUPPORTED on every try (2340x1080 on a 1920x1088 decoder). The host
+        // is asked for the same shrunk size in the Hello, so the stream fits too.
+        val (fitW, fitH) = decodableSize(width, height)
+        val alignedW = fitW and 0x7FFFFFFE // round down to even
+        val alignedH = fitH and 0x7FFFFFFE
         requestedWidth = alignedW
         requestedHeight = alignedH
 

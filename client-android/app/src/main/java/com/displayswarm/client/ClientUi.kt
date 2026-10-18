@@ -2,7 +2,15 @@ package com.displayswarm.client
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.drag
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.size
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.pointer.positionChange
+import kotlin.math.roundToInt
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.offset
 import androidx.compose.material.icons.filled.DragHandle
@@ -349,63 +357,87 @@ private fun ToolButton(icon: ImageVector, label: String, checked: Boolean = fals
 
 @Composable
 fun Toolbar(state: ClientUiState, actions: ClientActions, modifier: Modifier = Modifier) {
-    val density = LocalDensity.current
-    val config = LocalConfiguration.current
-    val screenW = with(density) { config.screenWidthDp.dp.toPx() }
-    val screenH = with(density) { config.screenHeightDp.dp.toPx() }
-    var size by remember { mutableStateOf(IntSize.Zero) }
-    // Unmoved: hug the left edge, vertically centred.
-    val x = (if (state.toolbarX < 0f) 0f else state.toolbarX).coerceIn(0f, (screenW - size.width).coerceAtLeast(0f))
-    val y = (if (state.toolbarY < 0f) (screenH - size.height) / 2f else state.toolbarY).coerceIn(0f, (screenH - size.height).coerceAtLeast(0f))
-    Surface(
-        modifier.offset { IntOffset(x.toInt(), y.toInt()) }.onSizeChanged { size = it }.padding(8.dp),
-        shape = RoundedCornerShape(24.dp),
-        color = Color(0xE61E1E2E)
-    ) {
-        Column(
-            Modifier.padding(4.dp).verticalScroll(rememberScrollState()),
-            horizontalAlignment = Alignment.CenterHorizontally
+    // Bounds come from the space ClientUi gives us (the whole immersive window), not the
+    // Configuration's screen size, which leaves out the system bars and cutout.
+    // The box has no pointer input, so touches outside the toolbar still fall through.
+    BoxWithConstraints(modifier.fillMaxSize()) {
+        var size by remember { mutableStateOf(IntSize.Zero) }
+        val maxX = (constraints.maxWidth - size.width).coerceAtLeast(0).toFloat()
+        val maxY = (constraints.maxHeight - size.height).coerceAtLeast(0).toFloat()
+        // Unmoved: hug the left edge, vertically centred.
+        val x = (if (state.toolbarX < 0f) 0f else state.toolbarX).coerceIn(0f, maxX)
+        val y = (if (state.toolbarY < 0f) maxY / 2f else state.toolbarY).coerceIn(0f, maxY)
+        // The grip's gesture coroutine outlives recompositions: read the live position and
+        // bounds through these, not values captured on the first frame (size was still zero).
+        val current by rememberUpdatedState(Offset(x, y))
+        val bounds by rememberUpdatedState(Offset(maxX, maxY))
+        Surface(
+            Modifier.offset { IntOffset(x.roundToInt(), y.roundToInt()) }.onSizeChanged { size = it }.padding(8.dp),
+            shape = RoundedCornerShape(24.dp),
+            color = Color(0xE61E1E2E)
         ) {
-            // Grip: drag to put the toolbar anywhere on the screen; the spot is remembered.
-            Icon(
-                Icons.Filled.DragHandle, "Move toolbar", tint = Color(0xAAFFFFFF),
-                modifier = Modifier.padding(vertical = 8.dp).pointerInput(Unit) {
-                    detectDragGestures(
-                        onDragStart = { state.toolbarX = x; state.toolbarY = y },
-                        onDragEnd = { state.settings.toolbarX = state.toolbarX; state.settings.toolbarY = state.toolbarY }
-                    ) { change, drag ->
-                        change.consume()
-                        state.toolbarX = (state.toolbarX + drag.x).coerceIn(0f, (screenW - size.width).coerceAtLeast(0f))
-                        state.toolbarY = (state.toolbarY + drag.y).coerceIn(0f, (screenH - size.height).coerceAtLeast(0f))
-                    }
+            Column(Modifier.padding(4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                // Grip: drag to put the toolbar anywhere on the screen; the spot is remembered.
+                // Outside the scrolling list so the two never fight over a vertical drag, and it
+                // follows the finger from the first touch instead of waiting out the touch slop.
+                Box(
+                    Modifier.size(width = 48.dp, height = 40.dp).pointerInput(Unit) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown()
+                            down.consume()
+                            var pos = current
+                            drag(down.id) { change ->
+                                val d = change.positionChange()
+                                change.consume()
+                                pos = Offset((pos.x + d.x).coerceIn(0f, bounds.x), (pos.y + d.y).coerceIn(0f, bounds.y))
+                                state.toolbarX = pos.x
+                                state.toolbarY = pos.y
+                            }
+                            state.settings.toolbarX = state.toolbarX
+                            state.settings.toolbarY = state.toolbarY
+                        }
+                    },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Filled.DragHandle, "Move toolbar", tint = Color(0xAAFFFFFF))
                 }
-            )
-            ToolButton(Icons.Filled.Close, "Close toolbar") { state.toolbarOpen = false }
-            ToolButton(Icons.Filled.Keyboard, "Keyboard") { actions.toggleKeyboard() }
-            ToolButton(Icons.Filled.Apps, "Shortcuts", state.shortcutsOpen) { state.shortcutsOpen = !state.shortcutsOpen }
-            ToolButton(Icons.Filled.Dashboard, "Macro pad", state.macrosOpen) { state.macrosOpen = !state.macrosOpen }
-            if (state.touchMode == TouchMode.TOUCHPAD) {
-                ToolButton(Icons.Filled.Mouse, "Touchpad mode (tap for direct)", true) { actions.setTouchMode(TouchMode.DIRECT) }
-            } else {
-                ToolButton(Icons.Filled.TouchApp, "Direct mode (tap for touchpad)") { actions.setTouchMode(TouchMode.TOUCHPAD) }
+                Column(
+                    Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    ToolbarButtons(state, actions)
+                }
             }
-            ToolButton(Icons.Filled.OpenInFull, "Two-finger zoom", state.zoomEnabled) { actions.setZoomEnabled(!state.zoomEnabled) }
-            if (state.zoomed) ToolButton(Icons.Filled.FitScreen, "Reset zoom") { actions.resetZoom() }
-            ToolButton(
-                if (state.rotationLock) Icons.Filled.ScreenLockRotation else Icons.Filled.ScreenRotation,
-                "Rotation lock", state.rotationLock
-            ) { actions.setRotationLock(!state.rotationLock) }
-            ToolButton(if (state.audioOut) Icons.Filled.VolumeUp else Icons.Filled.VolumeOff, "Audio", state.audioOut) {
-                actions.setAudio(!state.audioOut)
-            }
-            ToolButton(if (state.mic) Icons.Filled.Mic else Icons.Filled.MicOff, "Microphone", state.mic) {
-                actions.setMic(!state.mic)
-            }
-            ToolButton(Icons.Filled.SwapHoriz, "Role") { state.chooserFirst = false; state.chooserOpen = true }
-            ToolButton(Icons.Filled.Settings, "Settings") { state.settingsOpen = true }
-            ToolButton(Icons.Filled.PowerSettingsNew, "Disconnect") { actions.disconnect() }
         }
     }
+}
+
+@Composable
+private fun ToolbarButtons(state: ClientUiState, actions: ClientActions) {
+    ToolButton(Icons.Filled.Close, "Close toolbar") { state.toolbarOpen = false }
+    ToolButton(Icons.Filled.Keyboard, "Keyboard") { actions.toggleKeyboard() }
+    ToolButton(Icons.Filled.Apps, "Shortcuts", state.shortcutsOpen) { state.shortcutsOpen = !state.shortcutsOpen }
+    ToolButton(Icons.Filled.Dashboard, "Macro pad", state.macrosOpen) { state.macrosOpen = !state.macrosOpen }
+    if (state.touchMode == TouchMode.TOUCHPAD) {
+        ToolButton(Icons.Filled.Mouse, "Touchpad mode (tap for direct)", true) { actions.setTouchMode(TouchMode.DIRECT) }
+    } else {
+        ToolButton(Icons.Filled.TouchApp, "Direct mode (tap for touchpad)") { actions.setTouchMode(TouchMode.TOUCHPAD) }
+    }
+    ToolButton(Icons.Filled.OpenInFull, "Two-finger zoom", state.zoomEnabled) { actions.setZoomEnabled(!state.zoomEnabled) }
+    if (state.zoomed) ToolButton(Icons.Filled.FitScreen, "Reset zoom") { actions.resetZoom() }
+    ToolButton(
+        if (state.rotationLock) Icons.Filled.ScreenLockRotation else Icons.Filled.ScreenRotation,
+        "Rotation lock", state.rotationLock
+    ) { actions.setRotationLock(!state.rotationLock) }
+    ToolButton(if (state.audioOut) Icons.Filled.VolumeUp else Icons.Filled.VolumeOff, "Audio", state.audioOut) {
+        actions.setAudio(!state.audioOut)
+    }
+    ToolButton(if (state.mic) Icons.Filled.Mic else Icons.Filled.MicOff, "Microphone", state.mic) {
+        actions.setMic(!state.mic)
+    }
+    ToolButton(Icons.Filled.SwapHoriz, "Role") { state.chooserFirst = false; state.chooserOpen = true }
+    ToolButton(Icons.Filled.Settings, "Settings") { state.settingsOpen = true }
+    ToolButton(Icons.Filled.PowerSettingsNew, "Disconnect") { actions.disconnect() }
 }
 
 // ---- Shortcut bar -----------------------------------------------------------
