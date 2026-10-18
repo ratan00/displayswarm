@@ -208,7 +208,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback, ClientActions 
         panelSentW = displayWidth
         panelSentH = displayHeight
         inputManager?.send(
-            Wire.Message.Resize(displayWidth, displayHeight, resources.displayMetrics.densityDpi, rotation)
+            Wire.Message.Resize(displayWidth, displayHeight, reportedDensityDpi(), rotation)
         )
     }
 
@@ -339,6 +339,9 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback, ClientActions 
         keyboardVisible = !keyboardVisible
         inputManager?.setSoftKeyboardEnabled(keyboardVisible)
     }
+
+    /** 160 dpi is 1x, which the host reads as "leave the monitor at 100%". */
+    private fun reportedDensityDpi(): Int = if (settings.autoScale) resources.displayMetrics.densityDpi else 160
 
     private var keyboardVisible = false
     private var sessionServiceOn = false
@@ -564,7 +567,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback, ClientActions 
             width = displayWidth,
             height = displayHeight,
             refreshMhz = displayRefreshMhz,
-            densityDpi = resources.displayMetrics.densityDpi,
+            densityDpi = reportedDensityDpi(),
             codecs = Wire.CODEC_H264 or (if (hasHevcDecoder()) Wire.CODEC_HEVC else 0),
             features = Wire.FEATURE_TOUCH or Wire.FEATURE_STYLUS or Wire.FEATURE_KEYBOARD or PhoneServices.features(),
             maxTouchPoints = 10,

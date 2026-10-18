@@ -137,6 +137,8 @@ pub struct DeviceSettings {
     pub clipboard: bool,
     /// Lower fps/bitrate when the phone's battery is low or it runs hot (Phase 8).
     pub battery_saver: bool,
+    /// Scale the phone's monitor on the host to its screen density (KDE, GNOME).
+    pub auto_scale: bool,
     /// Picture quality versus bandwidth.
     pub video_quality: VideoQuality,
     /// Frame rate cap; 0 streams at the host's target rate.
@@ -154,6 +156,7 @@ impl Default for DeviceSettings {
             mic: false,
             clipboard: true,
             battery_saver: true,
+            auto_scale: true,
             video_quality: VideoQuality::Auto,
             max_fps: 0,
         }

@@ -621,7 +621,7 @@ pub fn target_for(role: Role, record: &DeviceRecord, hello: &Hello) -> Option<Ca
             width: hello.width as u32,
             height: hello.height as u32,
             refresh_mhz: hello.refresh_mhz,
-            density_dpi: hello.density_dpi,
+            density_dpi: if record.settings.auto_scale { hello.density_dpi } else { 0 },
         }),
         Role::MirrorWindow => Some(CaptureTarget::Window),
         Role::Tablet | Role::InputPad | Role::SoundOnly => None,
