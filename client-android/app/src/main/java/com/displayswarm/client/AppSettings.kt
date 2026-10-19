@@ -162,6 +162,10 @@ class AppSettings(private val store: SettingsStore) {
         const val KEY_TOOLBAR_X = "toolbar_x"
         const val KEY_TOOLBAR_Y = "toolbar_y"
         const val KEY_POINTER_SPEED = "pointer_speed"
+        const val KEY_SCROLL_SPEED = "scroll_speed"
+        const val KEY_HOST_SCALE = "host_scale"
+        const val KEY_PEN_SENSITIVITY = "pen_sensitivity"
+        const val KEY_TOUCH_SENSITIVITY = "touch_sensitivity"
         const val KEY_MACROS = "macros"
         const val KEY_LAST_HOST = "last_host"
 
@@ -258,6 +262,26 @@ class AppSettings(private val store: SettingsStore) {
     var pointerSpeed: Float
         get() = store.getFloat(KEY_POINTER_SPEED, 1.5f).coerceIn(0.5f, 2.5f)
         set(v) = set(KEY_POINTER_SPEED, v.coerceIn(0.5f, 2.5f))
+
+    /** Desktop scale in percent (100..300, steps of 25) asked of the host when [autoScale] is off. */
+    var hostScale: Int
+        get() = store.getString(KEY_HOST_SCALE, "100").toIntOrNull()?.coerceIn(100, 300) ?: 100
+        set(v) = set(KEY_HOST_SCALE, v.coerceIn(100, 300).toString())
+
+    /** Two-finger scroll speed multiplier, 0.5..3, for touchpad and direct mode. */
+    var scrollSpeed: Float
+        get() = store.getFloat(KEY_SCROLL_SPEED, 1f).coerceIn(0.5f, 3f)
+        set(v) = set(KEY_SCROLL_SPEED, v.coerceIn(0.5f, 3f))
+
+    /** Pen pressure response, 0.5..2: above 1 a light touch draws heavier, below 1 it needs a firmer press. */
+    var penSensitivity: Float
+        get() = store.getFloat(KEY_PEN_SENSITIVITY, 1f).coerceIn(0.5f, 2f)
+        set(v) = set(KEY_PEN_SENSITIVITY, v.coerceIn(0.5f, 2f))
+
+    /** Finger pressure scale sent with touches, 0.5..2. */
+    var touchSensitivity: Float
+        get() = store.getFloat(KEY_TOUCH_SENSITIVITY, 1f).coerceIn(0.5f, 2f)
+        set(v) = set(KEY_TOUCH_SENSITIVITY, v.coerceIn(0.5f, 2f))
 
     var macros: List<Macro>
         get() {

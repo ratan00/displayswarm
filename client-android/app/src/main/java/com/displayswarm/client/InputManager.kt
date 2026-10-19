@@ -449,6 +449,9 @@ class InputManager(
     private var zoomPrevCx = 0f
     private var zoomPrevCy = 0f
     private var zoomPrevDist = 1f
+    private var scrollGesture = false
+    private var scrollPrevCx = 0f
+    private var scrollPrevCy = 0f
 
     /**
      * False in roles that take no input (Sound only): touches, pen, mouse and
@@ -463,9 +466,15 @@ class InputManager(
         onPacketReady(msg.encode())
     }
 
-    fun setTouchpadConfig(pointerSpeed: Float, natural: Boolean, density: Float) {
-        gestures.config = GestureEngine.Config.forDensity(density).copy(
-            pointerGain = pointerSpeed, naturalScroll = natural
+    /** See [AppSettings.penSensitivity] and [AppSettings.touchSensitivity]. */
+    var penSensitivity = 1f
+    var touchSensitivity = 1f
+
+    fun setTouchpadConfig(pointerSpeed: Float, natural: Boolean, density: Float, scrollSpeed: Float = 1f) {
+        val base = GestureEngine.Config.forDensity(density)
+        gestures.config = base.copy(
+            pointerGain = pointerSpeed, naturalScroll = natural,
+            pxPerDetent = base.pxPerDetent / scrollSpeed.coerceAtLeast(0.1f)
         )
     }
 
@@ -608,6 +617,7 @@ class InputManager(
             return true
         }
         if (localZoom && localZoomGesture(event, actionMasked)) return true
+        if (!localZoom && directScrollGesture(event, actionMasked)) return true
         return emitTouchEvent(event, actionMasked, actionIndex, width, height)
     }
 
@@ -681,6 +691,58 @@ class InputManager(
         return true
     }
 
+    /**
+     * Two fingers in direct mode without [localZoom]: a swipe scrolls the host
+     * like a wheel. The first finger was already sent as a touch, so it is
+     * cancelled when the second lands; a third finger hands back to plain touches.
+     * Returns true when the event was consumed here.
+     */
+    private fun directScrollGesture(event: MotionEvent, actionMasked: Int): Boolean {
+        val fingers = fingerPtrs(event)
+        if (!scrollGesture) {
+            if (actionMasked != MotionEvent.ACTION_POINTER_DOWN || fingers.size != 2) return false
+            scrollGesture = true
+            val first = fingers.first()
+            val cancel = Wire.Message.Touch(
+                Wire.ACTION_CANCEL, first.id,
+                listOf(Wire.TouchPoint(first.id, viewport.toContentX(first.x), viewport.toContentY(first.y), 0f))
+            )
+            palmFilter.filterTouch(cancel, event.eventTime).forEach { send(it) }
+            scrollPrevCx = fingers.map { it.x }.average().toFloat()
+            scrollPrevCy = fingers.map { it.y }.average().toFloat()
+            sendDirectScroll(Wire.PHASE_BEGIN, 0f, 0f)
+            return true
+        }
+        when (actionMasked) {
+            MotionEvent.ACTION_MOVE -> if (fingers.size >= 2) {
+                val cx = fingers.map { it.x }.average().toFloat()
+                val cy = fingers.map { it.y }.average().toFloat()
+                // Same signs as the touchpad scroll: natural follows the fingers vertically.
+                val c = gestures.config
+                val sign = if (c.naturalScroll) 1f else -1f
+                sendDirectScroll(Wire.PHASE_UPDATE, -sign * (cx - scrollPrevCx) / c.pxPerDetent, sign * (cy - scrollPrevCy) / c.pxPerDetent)
+                scrollPrevCx = cx
+                scrollPrevCy = cy
+            }
+            MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_POINTER_DOWN -> {
+                // The finger set changed: re-base so the scroll does not jump.
+                val rest = fingerPtrs(event, if (actionMasked == MotionEvent.ACTION_POINTER_UP) event.actionIndex else -1)
+                if (rest.size >= 2) {
+                    scrollPrevCx = rest.map { it.x }.average().toFloat()
+                    scrollPrevCy = rest.map { it.y }.average().toFloat()
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                scrollGesture = false
+                sendDirectScroll(Wire.PHASE_END, 0f, 0f)
+            }
+        }
+        return true
+    }
+
+    private fun sendDirectScroll(phase: Int, dx: Float, dy: Float) =
+        send(Wire.Message.Scroll(phase, viewport.toContentX(scrollPrevCx), viewport.toContentY(scrollPrevCy), dx, dy))
+
     private fun pinchDistance(p: List<GestureEngine.Ptr>): Float =
         kotlin.math.hypot(p[1].x - p[0].x, p[1].y - p[0].y).coerceAtLeast(1f)
 
@@ -708,7 +770,7 @@ class InputManager(
                     id = event.getPointerId(i),
                     x = viewport.toContentX(event.getX(i)),
                     y = viewport.toContentY(event.getY(i)),
-                    pressure = event.getPressure(i).coerceIn(0.0f, 1.0f)
+                    pressure = (event.getPressure(i) * touchSensitivity).coerceIn(0.0f, 1.0f)
                 )
             )
         }
@@ -779,7 +841,7 @@ class InputManager(
                     ageUs = ageUs,
                     x = viewport.toContentX(axis(MotionEvent.AXIS_X)),
                     y = viewport.toContentY(axis(MotionEvent.AXIS_Y)),
-                    pressure = penPressureCurve(axis(MotionEvent.AXIS_PRESSURE)),
+                    pressure = penPressureCurve(axis(MotionEvent.AXIS_PRESSURE), penSensitivity),
                     tiltX = tiltX.toFloat(),
                     tiltY = tiltY.toFloat()
                 )
@@ -999,9 +1061,9 @@ class InputManager(
  * fraction of the range, which drawing apps then read as a faint, thin line. A
  * gentle curve (exponent 0.6) lifts the low end and keeps 0 and 1 where they are.
  */
-internal fun penPressureCurve(raw: Float): Float {
+internal fun penPressureCurve(raw: Float, sensitivity: Float = 1f): Float {
     val p = if (raw.isNaN()) 0f else raw.coerceIn(0.0f, 1.0f)
-    return Math.pow(p.toDouble(), 0.6).toFloat()
+    return Math.pow(p.toDouble(), 0.6 / sensitivity.coerceIn(0.5f, 2f)).toFloat()
 }
 
 /**

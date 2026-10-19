@@ -60,6 +60,22 @@ class SettingsActivity : AppCompatActivity() {
             addView(themedButton("Done") { finish() })
         })
 
+        fun slider(label: String, from: Float, to: Float, current: Float, step: Float = 0f, onDone: (Float) -> Unit) {
+            var value = current.coerceIn(from, to)
+            column.addView(text(label, 16f, fg).apply { setPadding(0, dp(8), 0, 0) })
+            column.addView(Slider(this).apply {
+                valueFrom = from
+                valueTo = to
+                if (step > 0f) stepSize = step
+                this.value = value
+                addOnChangeListener { _, v, fromUser -> if (fromUser) value = v }
+                addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
+                    override fun onStartTrackingTouch(slider: Slider) {}
+                    override fun onStopTrackingTouch(slider: Slider) { onDone(value) }
+                })
+            })
+        }
+
         column.section("Display")
         column.switchRow("Keep screen on", null, state.keepScreenOn) { state.keepScreenOn = it; s.keepScreenOn = it; actions.settingsChanged() }
         column.switchRow("Auto-reconnect", "Reconnect when the link drops", state.autoReconnect) { state.autoReconnect = it; s.autoReconnect = it }
@@ -75,8 +91,11 @@ class SettingsActivity : AppCompatActivity() {
         column.switchRow("Phone microphone to host", null, state.mic) { actions.setMic(it) }
 
         column.section("Display")
-        column.switchRow("Scale this screen on the host", "Off: the host keeps its monitor for this phone at 100%. Applies on the next connection.", state.autoScale) {
+        column.switchRow("Scale this screen on the host", "On: the host scales this phone's monitor to its screen density. Off: the scale below is used. Applies on the next connection.", state.autoScale) {
             state.autoScale = it; s.autoScale = it
+        }
+        slider("Host scale when automatic is off (%)", 100f, 300f, state.hostScale.toFloat(), step = 25f) {
+            state.hostScale = it.toInt(); s.hostScale = it.toInt()
         }
 
         column.section("Touchpad")
@@ -96,7 +115,11 @@ class SettingsActivity : AppCompatActivity() {
             })
         })
 
+        slider("Scroll speed", 0.5f, 3f, state.scrollSpeed) { state.scrollSpeed = it; s.scrollSpeed = it; actions.settingsChanged() }
+        slider("Touch sensitivity", 0.5f, 2f, state.touchSensitivity) { state.touchSensitivity = it; s.touchSensitivity = it; actions.settingsChanged() }
+
         column.section("Pen")
+        slider("Pen sensitivity", 0.5f, 2f, state.penSensitivity) { state.penSensitivity = it; s.penSensitivity = it; actions.settingsChanged() }
         column.switchRow("Palm rejection", "Ignore fingers while the pen is near", state.palmRejection) {
             state.palmRejection = it; s.palmRejection = it; actions.settingsChanged()
         }

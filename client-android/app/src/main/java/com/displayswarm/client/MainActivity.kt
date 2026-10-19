@@ -290,7 +290,9 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback, ClientActions 
         im.palmFilter.enabled = settings.palmRejection
         im.strokePrediction = settings.strokePrediction
         im.penMapping = settings.penMapping
-        im.setTouchpadConfig(settings.pointerSpeed, settings.naturalScroll, resources.displayMetrics.density)
+        im.setTouchpadConfig(settings.pointerSpeed, settings.naturalScroll, resources.displayMetrics.density, settings.scrollSpeed)
+        im.penSensitivity = settings.penSensitivity
+        im.touchSensitivity = settings.touchSensitivity
         // The input pad is a touchpad by definition; the pen role is always direct.
         val role = ui.role.role
         im.touchMode = if (role == Wire.ROLE_INPUT_PAD) TouchMode.TOUCHPAD else ui.touchMode
@@ -343,7 +345,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback, ClientActions 
     }
 
     /** 160 dpi is 1x, which the host reads as "leave the monitor at 100%". */
-    private fun reportedDensityDpi(): Int = if (settings.autoScale) resources.displayMetrics.densityDpi else 160
+    private fun reportedDensityDpi(): Int = if (settings.autoScale) resources.displayMetrics.densityDpi else 160 * settings.hostScale / 100
 
     private var keyboardVisible = false
     private var sessionServiceOn = false
