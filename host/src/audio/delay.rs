@@ -12,10 +12,13 @@ use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use super::sink::{read_default_sink_name, DefaultSinkGuard};
+use super::sink::{read_default_sink_name, set_default_sink, DefaultSinkGuard};
 
-/// `node.name` of the delaying sink.
-const NODE_NAME: &str = "displayswarm_delayed_speakers";
+/// `node.name` of the delaying sink. Two names alternate: a new delay is built
+/// beside the running one and swapped in, so the sink never disappears.
+fn node_name(slot: u8) -> String {
+    format!("displayswarm_delayed_speakers_{slot}")
+}
 
 /// What the laptop's own output path (PipeWire period, the sound card) already
 /// adds, so the loopback only has to add the rest.
@@ -44,6 +47,9 @@ const MAX_DELAY_US: u32 = 500_000;
 /// How long to wait for the virtual sink to show up.
 const SINK_WAIT: Duration = Duration::from_secs(3);
 
+/// How long both delaying sinks coexist so playing apps can move over.
+const MOVE_GRACE: Duration = Duration::from_millis(500);
+
 /// The delay to add on the laptop for a phone that is `phone_latency_us` late.
 /// With several phones in sync the shared playout delay is what everyone
 /// aligns to, so that wins when it is set.
@@ -59,7 +65,7 @@ pub fn needs_restart(applied_us: u32, wanted_us: u32) -> bool {
 }
 
 /// Arguments of `pw-loopback` for a delay of `delay_us` into `real_sink`.
-pub fn loopback_args(delay_us: u32, real_sink: &str) -> Vec<String> {
+pub fn loopback_args(delay_us: u32, real_sink: &str, node: &str) -> Vec<String> {
     vec![
         "-n".into(),
         "displayswarm-speaker-delay".into(),
@@ -71,7 +77,7 @@ pub fn loopback_args(delay_us: u32, real_sink: &str) -> Vec<String> {
         format!("{:.3}", delay_us as f64 / 1_000_000.0),
         "-i".into(),
         format!(
-            "media.class=Audio/Sink node.name={NODE_NAME} node.description=DisplaySwarm-delayed-speakers audio.position=[FL,FR]"
+            "media.class=Audio/Sink node.name={node} node.description=DisplaySwarm-delayed-speakers audio.position=[FL,FR]"
         ),
         "-P".into(),
         real_sink.to_string(),
@@ -83,6 +89,7 @@ pub struct HostDelay {
     // delaying sink goes away.
     _default: DefaultSinkGuard,
     child: Child,
+    slot: u8,
     real_sink: String,
     applied_us: u32,
     changed_at: Instant,
@@ -92,53 +99,65 @@ impl HostDelay {
     /// Routes the laptop's output through a delay of `delay_us`.
     pub fn start(delay_us: u32) -> Result<Self, String> {
         let real_sink = read_default_sink_name().ok_or("cannot tell which output the laptop uses")?;
-        if real_sink == NODE_NAME {
+        if real_sink.starts_with("displayswarm_delayed_speakers") {
             return Err("the laptop's output is already the delaying sink".into());
         }
-        let child = spawn(delay_us, &real_sink)?;
-        let mut me_child = child;
-        if !wait_for_sink(&mut me_child) {
+        let mut me_child = spawn(delay_us, &real_sink, &node_name(0))?;
+        if !wait_for_sink(&mut me_child, &node_name(0)) {
             let _ = me_child.kill();
             let _ = me_child.wait();
             return Err("pw-loopback did not create the delaying sink".into());
         }
-        let guard = DefaultSinkGuard::set(NODE_NAME).ok_or_else(|| {
+        let guard = DefaultSinkGuard::set(&node_name(0)).ok_or_else(|| {
             let _ = me_child.kill();
             let _ = me_child.wait();
             "could not make the delaying sink the default output".to_string()
         })?;
         log::info!("audio: laptop speakers delayed by {} ms (into {real_sink})", delay_us / 1000);
-        Ok(Self { _default: guard, child: me_child, real_sink, applied_us: delay_us, changed_at: Instant::now() })
+        Ok(Self { _default: guard, child: me_child, slot: 0, real_sink, applied_us: delay_us, changed_at: Instant::now() })
     }
 
     pub fn applied_us(&self) -> u32 {
         self.applied_us
     }
 
-    /// Changes the delay if it moved enough to matter. The default output stays
-    /// pointed at the delaying sink; only the loopback behind it restarts.
+    /// Changes the delay if it moved enough to matter. The new delay is built
+    /// beside the old one, the default output is pointed at it, and only then
+    /// is the old one removed, so the sink never vanishes and playback goes on.
     pub fn set_delay(&mut self, delay_us: u32) {
         if !needs_restart(self.applied_us, delay_us) || self.changed_at.elapsed() < MIN_CHANGE_INTERVAL {
             return;
         }
         self.changed_at = Instant::now();
+        let slot = 1 - self.slot;
+        let name = node_name(slot);
+        let mut next = match spawn(delay_us, &self.real_sink, &name) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("audio: cannot change the speaker delay: {e}");
+                return;
+            }
+        };
+        if !wait_for_sink(&mut next, &name) {
+            log::warn!("audio: the new delaying sink did not appear; keeping the old delay");
+            let _ = next.kill();
+            let _ = next.wait();
+            return;
+        }
+        if !set_default_sink(&name) {
+            log::warn!("audio: cannot point the output at the new delay; keeping the old delay");
+            let _ = next.kill();
+            let _ = next.wait();
+            return;
+        }
+        // Let players follow the default output before the old sink goes.
+        std::thread::sleep(MOVE_GRACE);
         let _ = self.child.kill();
         let _ = self.child.wait();
-        match spawn(delay_us, &self.real_sink) {
-            Ok(mut c) => {
-                if !wait_for_sink(&mut c) {
-                    log::warn!("audio: the delaying sink did not come back");
-                }
-                self.child = c;
-                self.applied_us = delay_us;
-                log::info!("audio: laptop speakers now delayed by {} ms", delay_us / 1000);
-            }
-            Err(e) => {
-                // The default output points at a sink that is gone, so PipeWire falls back
-                // to the real speakers; keep the old child so Drop has something to reap.
-                log::warn!("audio: cannot change the speaker delay: {e}");
-            }
-        }
+        self.child = next;
+        self.slot = slot;
+        self.applied_us = delay_us;
+        log::info!("audio: laptop speakers now delayed by {} ms", delay_us / 1000);
     }
 }
 
@@ -149,9 +168,9 @@ impl Drop for HostDelay {
     }
 }
 
-fn spawn(delay_us: u32, real_sink: &str) -> Result<Child, String> {
+fn spawn(delay_us: u32, real_sink: &str, node: &str) -> Result<Child, String> {
     let mut cmd = Command::new("pw-loopback");
-    cmd.args(loopback_args(delay_us, real_sink)).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.args(loopback_args(delay_us, real_sink, node)).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     // If the daemon dies the loopback goes with it.
     unsafe {
         cmd.pre_exec(|| {
@@ -163,13 +182,13 @@ fn spawn(delay_us: u32, real_sink: &str) -> Result<Child, String> {
 }
 
 /// Polls until the delaying sink is registered (or the child died).
-fn wait_for_sink(child: &mut Child) -> bool {
+fn wait_for_sink(child: &mut Child, node: &str) -> bool {
     let start = Instant::now();
     while start.elapsed() < SINK_WAIT {
         if matches!(child.try_wait(), Ok(Some(_))) {
             return false;
         }
-        if sink_exists() {
+        if sink_exists(node) {
             return true;
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -177,11 +196,11 @@ fn wait_for_sink(child: &mut Child) -> bool {
     false
 }
 
-fn sink_exists() -> bool {
+fn sink_exists(node: &str) -> bool {
     Command::new("pactl")
         .args(["list", "short", "sinks"])
         .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).lines().any(|l| l.split_whitespace().nth(1) == Some(NODE_NAME)))
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().any(|l| l.split_whitespace().nth(1) == Some(node)))
         .unwrap_or(false)
 }
 
@@ -216,10 +235,10 @@ mod tests {
 
     #[test]
     fn loopback_arguments_carry_the_delay_and_the_real_sink() {
-        let a = loopback_args(150_000, "alsa_output.pci");
+        let a = loopback_args(150_000, "alsa_output.pci", "node_a");
         let at = |flag: &str| a.iter().position(|x| x == flag).map(|i| a[i + 1].clone());
         assert_eq!(at("-d").as_deref(), Some("0.150"));
         assert_eq!(at("-P").as_deref(), Some("alsa_output.pci"));
-        assert!(at("-i").unwrap().contains("media.class=Audio/Sink"));
+        assert!(at("-i").unwrap().contains("media.class=Audio/Sink node.name=node_a"));
     }
 }

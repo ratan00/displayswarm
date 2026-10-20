@@ -521,6 +521,13 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback, ClientActions 
             ui.status = "Video surface not ready yet, try again"
             return
         }
+        // A repeat tap while this host's connection is still being set up would
+        // drop it and start over, and the host then juggles both.
+        val current = lastTarget
+        if (networkClient != null && current != null && current.address.trim() == host.address.trim() && current.port == host.port) {
+            Log.i(TAG, "Already connecting to ${host.address}; ignoring the repeat")
+            return
+        }
         cancelReconnect()
         userDisconnected = false
         reconnectsLeft = 0 // set again once this attempt is established

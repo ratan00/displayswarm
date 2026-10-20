@@ -25,6 +25,7 @@
 use std::io;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -265,7 +266,12 @@ pub struct PairingManager {
     state: Mutex<State>,
     trust: Mutex<TrustStore>,
     listener: Mutex<Option<Arc<Listener>>>,
+    /// Accept every phone without a PIN or token (still over TLS). Off by default.
+    allow_unpaired: AtomicBool,
 }
+
+/// `DISPLAYSWARM_ALLOW_UNPAIRED=1` turns pairing off: any phone that can reach the port is let in.
+pub const ALLOW_UNPAIRED_ENV: &str = "DISPLAYSWARM_ALLOW_UNPAIRED";
 
 /// What `handle_request` decided.
 #[derive(Debug, PartialEq)]
@@ -283,7 +289,7 @@ fn respond(status: u8, message: &str, token: Vec<u8>, accepted: bool, close: boo
 
 impl PairingManager {
     pub fn new(trust: TrustStore) -> Arc<Self> {
-        Arc::new(Self { state: Mutex::default(), trust: Mutex::new(trust), listener: Mutex::new(None) })
+        Arc::new(Self { state: Mutex::default(), trust: Mutex::new(trust), listener: Mutex::new(None), allow_unpaired: AtomicBool::new(false) })
     }
 
     pub fn in_memory() -> Arc<Self> {
@@ -292,10 +298,23 @@ impl PairingManager {
 
     /// The trust store in the user's config directory; in memory if unusable.
     pub fn with_defaults() -> Arc<Self> {
-        Self::new(TrustStore::open_default().unwrap_or_else(|e| {
+        let m = Self::new(TrustStore::open_default().unwrap_or_else(|e| {
             log::warn!("Trust store unavailable ({e}); pairings will last only for this run");
             TrustStore::in_memory()
-        }))
+        }));
+        let on = std::env::var(ALLOW_UNPAIRED_ENV)
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false);
+        m.set_allow_unpaired(on);
+        m
+    }
+
+    /// Lets every phone in without pairing. Anyone on the network can then use this PC's screen and input.
+    pub fn set_allow_unpaired(&self, on: bool) {
+        if on {
+            log::warn!("{ALLOW_UNPAIRED_ENV}: pairing is OFF; any phone on the network can connect");
+        }
+        self.allow_unpaired.store(on, Ordering::Relaxed);
     }
 
     /// Registers the UI callback (any thread; keep it cheap).
@@ -397,6 +416,9 @@ impl PairingManager {
     ) -> Decision {
         if device_id.is_empty() {
             return respond(PAIR_WRONG, "The phone did not identify itself", vec![], false, true);
+        }
+        if self.allow_unpaired.load(Ordering::Relaxed) && matches!(mode, PAIR_MODE_TOKEN | PAIR_MODE_PIN | PAIR_MODE_QR) {
+            return respond(PAIR_OK, "", vec![], true, false);
         }
         match mode {
             PAIR_MODE_TOKEN => {
@@ -547,6 +569,17 @@ mod tests {
     use super::*;
 
     const FP: Fingerprint = [7u8; 32];
+
+    #[test]
+    fn unpaired_phones_are_let_in_only_when_allowed() {
+        let m = PairingManager::in_memory();
+        assert_eq!(status(&m.handle_request(&FP, PAIR_MODE_TOKEN, "dev", "Phone", b"")), PAIR_UNTRUSTED);
+        m.set_allow_unpaired(true);
+        let d = m.handle_request(&FP, PAIR_MODE_TOKEN, "dev", "Phone", b"");
+        assert_eq!(status(&d), PAIR_OK);
+        assert!(d.accepted);
+        assert!(!m.handle_request(&FP, PAIR_MODE_TOKEN, "", "Phone", b"").accepted, "still needs a device id");
+    }
 
     fn pin_of(m: &PairingManager) -> String {
         m.pending_offer().unwrap().pin.unwrap()

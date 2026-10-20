@@ -127,6 +127,8 @@ object Pairing {
 
         request(Wire.PAIR_MODE_PIN, ByteArray(0))
         var r = response()
+        // A host started with pairing off lets the phone straight in.
+        if (r.status == Wire.PAIR_OK) return finish(r)
         if (r.status != Wire.PAIR_PIN_REQUIRED) throw PairingException(refusal(r))
         var hint = r.message
         while (true) {

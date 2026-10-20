@@ -60,6 +60,14 @@ impl BitrateController {
         }
     }
 
+    /// Like [`Self::new`], but starting at `start_kbps` (the rate the link last
+    /// settled at) instead of the ceiling.
+    pub fn starting_at(max_kbps: u32, start_kbps: u32) -> Self {
+        let mut c = Self::new(max_kbps);
+        c.current = start_kbps.clamp(MIN_KBPS, c.max_kbps);
+        c
+    }
+
     pub fn current(&self) -> u32 {
         self.current
     }
@@ -148,6 +156,17 @@ mod tests {
             assert_eq!(c.update(clean(30)), None);
         }
         assert_eq!(c.current(), 20_000);
+    }
+
+    #[test]
+    fn a_resumed_link_starts_where_it_settled_and_climbs_from_there() {
+        let mut c = BitrateController::starting_at(20_000, 5_000);
+        assert_eq!(c.current(), 5_000);
+        c.update(clean(30));
+        c.update(clean(30));
+        assert_eq!(c.update(clean(30)), Some(7_000));
+        assert_eq!(BitrateController::starting_at(20_000, 0).current(), MIN_KBPS);
+        assert_eq!(BitrateController::starting_at(20_000, 90_000).current(), 20_000);
     }
 
     #[test]

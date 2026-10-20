@@ -236,6 +236,10 @@ pub struct SessionManager {
     backends: Backends,
     sessions: Mutex<HashMap<String, SessionEntry>>,
     next_gen: AtomicU64,
+    /// The newest connection attempt of each device still waiting in [`Self::register`].
+    connecting: Mutex<HashMap<String, u64>>,
+    /// The adaptive bitrate each device's link last settled at, and when.
+    link_kbps: Mutex<HashMap<String, (Instant, u32)>>,
     on_change: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Device id of the one session that is the primary display, if any.
     primary_owner: Mutex<Option<String>>,
@@ -245,9 +249,23 @@ pub struct SessionManager {
     caps_cache: Mutex<Option<(Instant, crate::display::model::Capabilities)>>,
 }
 
+/// How long a reconnecting device resumes at the bitrate its link last settled
+/// at. Starting every reconnect at the ceiling overloaded a weak link (a phone
+/// hotspot) until it went silent, the phone dropped it, and the cycle repeated.
+const LINK_KBPS_MEMORY: Duration = Duration::from_secs(600);
+
 /// How long a capability lookup is reused. Detection asks the desktop's
 /// screen-share portal, which can be slow, and the answer hardly ever changes.
 const CAPS_TTL: Duration = Duration::from_secs(30);
+
+/// Why [`SessionManager::register`] turned a connection away.
+#[derive(Debug, PartialEq, Eq)]
+enum RegisterError {
+    /// The manager already serves [`MAX_SESSIONS`] devices.
+    Full,
+    /// A newer connection of the same device arrived while this one waited.
+    Superseded,
+}
 
 /// Held by a running session; removes it from the manager on drop.
 struct Registration {
@@ -287,6 +305,8 @@ impl SessionManager {
             backends,
             sessions: Mutex::new(HashMap::new()),
             next_gen: AtomicU64::new(1),
+            connecting: Mutex::new(HashMap::new()),
+            link_kbps: Mutex::new(HashMap::new()),
             on_change: Mutex::new(None),
             primary_owner: Mutex::new(None),
             caps_cache: Mutex::new(None),
@@ -383,6 +403,30 @@ impl SessionManager {
 
     fn lock_sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, SessionEntry>> {
         self.sessions.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn remember_link_kbps(&self, device_id: &str, kbps: u32) {
+        self.link_kbps.lock().unwrap_or_else(|e| e.into_inner()).insert(device_id.to_string(), (Instant::now(), kbps));
+    }
+
+    /// The bitrate the device's link settled at within [`LINK_KBPS_MEMORY`].
+    fn recent_link_kbps(&self, device_id: &str) -> Option<u32> {
+        let map = self.link_kbps.lock().unwrap_or_else(|e| e.into_inner());
+        map.get(device_id).filter(|(at, _)| at.elapsed() < LINK_KBPS_MEMORY).map(|(_, k)| *k)
+    }
+
+    fn lock_connecting(&self) -> std::sync::MutexGuard<'_, HashMap<String, u64>> {
+        self.connecting.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Ends connection attempt `ticket` of `device_id`; false when a newer one replaced it.
+    fn finish_connecting(&self, device_id: &str, ticket: u64) -> bool {
+        let mut c = self.lock_connecting();
+        if c.get(device_id) != Some(&ticket) {
+            return false;
+        }
+        c.remove(device_id);
+        true
     }
 
     fn lock_store(&self) -> std::sync::MutexGuard<'_, DeviceStore> {
@@ -565,13 +609,17 @@ impl SessionManager {
     }
 
     /// Adds a session for `device_id`, replacing (and waiting, bounded, for) an
-    /// older session of the same device. `Err(())` when the manager is full.
+    /// older session of the same device.
     async fn register(
         self: &Arc<Self>,
         device_id: &str,
         via_aoa: bool,
         effective_role: Role,
-    ) -> Result<Registration, ()> {
+    ) -> Result<Registration, RegisterError> {
+        // Phones that reconnect quickly can queue several connections behind one
+        // old session; only the newest may proceed, or they all start at once.
+        let ticket = self.next_gen.fetch_add(1, Ordering::Relaxed);
+        self.lock_connecting().insert(device_id.to_string(), ticket);
         let old_done = {
             let map = self.lock_sessions();
             match map.get(device_id) {
@@ -582,13 +630,20 @@ impl SessionManager {
                     ));
                     Some(old.done_rx.clone())
                 }
-                None if map.len() >= MAX_SESSIONS => return Err(()),
+                None if map.len() >= MAX_SESSIONS => {
+                    drop(map);
+                    self.finish_connecting(device_id, ticket);
+                    return Err(RegisterError::Full);
+                }
                 None => None,
             }
         };
         if let Some(mut done) = old_done {
             log::info!("{device_id} reconnected; waiting for its old session to finish");
             let _ = tokio::time::timeout(REPLACE_WAIT, async { while done.changed().await.is_ok() {} }).await;
+        }
+        if !self.finish_connecting(device_id, ticket) {
+            return Err(RegisterError::Superseded);
         }
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
@@ -2197,9 +2252,16 @@ where
         let why = "This phone is already connected over USB".to_string();
         return Err(refuse(&mut writer, report, false, HELLO_BUSY, BYE_ERROR, why).await);
     }
-    let Ok(mut registration) = manager.register(&device_id, via_aoa, role).await else {
-        let why = format!("This PC already serves the maximum of {MAX_SESSIONS} devices");
-        return Err(refuse(&mut writer, report, false, HELLO_BUSY, BYE_ERROR, why).await);
+    let mut registration = match manager.register(&device_id, via_aoa, role).await {
+        Ok(r) => r,
+        Err(RegisterError::Full) => {
+            let why = format!("This PC already serves the maximum of {MAX_SESSIONS} devices");
+            return Err(refuse(&mut writer, report, false, HELLO_BUSY, BYE_ERROR, why).await);
+        }
+        Err(RegisterError::Superseded) => {
+            let why = "replaced by a newer connection from the same device".to_string();
+            return Err(refuse(&mut writer, report, false, HELLO_BUSY, BYE_NORMAL, why).await);
+        }
     };
     let resolution = Resolution {
         width: hello.width as u32,
@@ -2335,9 +2397,18 @@ where
 
     let mut live = Live { effective: role, pipeline: None, primary_attempted: false, panel: (env.hello.width, env.hello.height) };
     shared.input_allowed.store(role.takes_input(), Ordering::Relaxed);
-    live.pipeline = start_pipeline(&env, live.panel, role, &record, &shared, &frame_tx, &region_tx)?;
+    // The sender (and its heartbeats) runs before the pipeline is built: capture
+    // set-up can block on the portal for seconds, and the phone drops a link
+    // that stays silent for 3 s.
     let (bulk_tx, bulk_rx) = mpsc::channel::<Message>(BULK_QUEUE_DEPTH);
     let mut sender_task = tokio::spawn(sender_loop(writer, frame_rx, ctrl_rx, bulk_rx, shared.clone()));
+    live.pipeline = match run_blocking(|| start_pipeline(&env, live.panel, role, &record, &shared, &frame_tx, &region_tx)) {
+        Ok(p) => p,
+        Err(e) => {
+            sender_task.abort();
+            return Err(e.into());
+        }
+    };
 
     // Network sessions with a phone that can take it: audio over UDP too.
     let audio_udp = match env.audio_udp_path {
@@ -2388,6 +2459,9 @@ where
         })
     };
     let mut region_watch = region_rx;
+    // Liveness counts from here: the pipeline set-up above can outlast the timeout
+    // while the phone's bytes wait unread.
+    shared.touch();
 
     // ---- Monitor loop ------------------------------------------------------
     let mut tick = tokio::time::interval(Duration::from_millis(100));
@@ -2396,7 +2470,16 @@ where
     // Every STATS_LOG_EVERY-th one-second window is logged at info, the rest at debug.
     let mut stats_windows = 0u64;
     let mut last_injected: u64 = 0;
-    let mut abr = env.adaptive.then(|| crate::transport::bitrate::BitrateController::new(env.bitrate_kbps));
+    let mut abr = env.adaptive.then(|| match env.manager.recent_link_kbps(&env.device_id) {
+        Some(kbps) => crate::transport::bitrate::BitrateController::starting_at(env.bitrate_kbps, kbps),
+        None => crate::transport::bitrate::BitrateController::new(env.bitrate_kbps),
+    });
+    if let Some(ctl) = abr.as_ref().filter(|c| c.current() < env.bitrate_kbps) {
+        let kbps = ctl.current();
+        log::info!("Adaptive bitrate: resuming at {kbps} kbps, where this link last settled");
+        shared.bitrate_request.store(kbps, Ordering::Release);
+        let _ = ctrl_tx.send(Message::SetBitrate { kbps });
+    }
     let mut last_reported_state: Option<CaptureState> = None;
     let mut input_only_reported = false;
 
@@ -2598,6 +2681,7 @@ where
                     });
                     if let Some(kbps) = next {
                         log::info!("Adaptive bitrate: {kbps} kbps");
+                        env.manager.remember_link_kbps(&env.device_id, kbps);
                         shared.bitrate_request.store(kbps, Ordering::Release);
                         let _ = ctrl_tx.send(Message::SetBitrate { kbps });
                     }
@@ -2766,6 +2850,17 @@ impl Drop for PrimaryClaim {
 }
 
 /// Builds the pipeline for `role`, or `None` for a role without video.
+/// Runs blocking set-up work (capture and encoder start-up, which can wait on
+/// the portal for seconds) without stalling the session's other tasks: tokio
+/// keeps a freshly spawned task on the spawning worker, so blocking that worker
+/// held back the sender and its heartbeats too.
+fn run_blocking<T>(f: impl FnOnce() -> T) -> T {
+    match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
+        _ => f(),
+    }
+}
+
 fn start_pipeline(
     env: &SessionEnv,
     panel: (u16, u16),
@@ -2920,7 +3015,7 @@ async fn apply_role(
         }
         region_tx.send_if_modified(|cur| cur.take().is_some());
         let record = env.manager.record(&env.device_id).unwrap_or_else(|| fallback_record.clone());
-        live.pipeline = start_pipeline(env, live.panel, role, &record, shared, frame_tx, region_tx)
+        live.pipeline = run_blocking(|| start_pipeline(env, live.panel, role, &record, shared, frame_tx, region_tx))
             .map_err(|e| format!("could not start capture for {}: {e}", role.label()))?;
         live.effective = role;
         shared.input_allowed.store(role.takes_input(), Ordering::Relaxed);
@@ -2956,7 +3051,7 @@ async fn restart_pipeline(
     }
     region_tx.send_if_modified(|cur| cur.take().is_some());
     let record = env.manager.record(&env.device_id).unwrap_or_else(|| fallback_record.clone());
-    live.pipeline = start_pipeline(env, live.panel, live.effective, &record, shared, frame_tx, region_tx)
+    live.pipeline = run_blocking(|| start_pipeline(env, live.panel, live.effective, &record, shared, frame_tx, region_tx))
         .map_err(|e| format!("could not rebuild the encoder: {e}"))?;
     live.primary_attempted = false;
     Ok(())
@@ -2990,7 +3085,7 @@ async fn apply_resize(
     }
     region_tx.send_if_modified(|cur| cur.take().is_some());
     let record = env.manager.record(&env.device_id).unwrap_or_else(|| fallback_record.clone());
-    live.pipeline = start_pipeline(env, live.panel, live.effective, &record, shared, frame_tx, region_tx)
+    live.pipeline = run_blocking(|| start_pipeline(env, live.panel, live.effective, &record, shared, frame_tx, region_tx))
         .map_err(|e| format!("could not rebuild capture at {}x{}: {e}", panel.0, panel.1))?;
     live.primary_attempted = false;
     Ok(())
@@ -3257,6 +3352,24 @@ mod tests {
         assert_eq!(manager.session_count(), 0);
     }
 
+    /// Connections queued behind a device's old session: only the newest
+    /// proceeds once it ends, the others are turned away.
+    #[tokio::test]
+    async fn test_only_the_newest_queued_reconnect_registers() {
+        let manager = test_manager(&Arc::new(Probe::default()), None, true);
+        let mut old = manager.register("dev", false, Role::Mirror).await.unwrap();
+        let mut cmds = old.cmd_rx.take().unwrap();
+        let (m1, m2) = (manager.clone(), manager.clone());
+        let first = tokio::spawn(async move { m1.register("dev", false, Role::Mirror).await.map(|_| ()) });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let second = tokio::spawn(async move { m2.register("dev", false, Role::Mirror).await.map(|_| ()) });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(matches!(cmds.recv().await, Some(SessionCmd::End(EndKind::Replaced, _))));
+        drop(old);
+        assert_eq!(first.await.unwrap(), Err(RegisterError::Superseded));
+        assert_eq!(second.await.unwrap(), Ok(()));
+    }
+
     /// A Hello with a zero or absurd panel size is refused before anything is
     /// sized from it (65535 would wrap to 0 when aligned up to 16).
     #[tokio::test]
@@ -3450,6 +3563,8 @@ mod tests {
         primary_dropped: AtomicU32,
         /// Every `set_output_region` the injector received.
         regions: Mutex<Vec<Option<OutputRegion>>>,
+        /// How long building a capturer blocks, like a portal waiting on its dialog.
+        capture_delay_ms: AtomicU64,
     }
 
     struct ProbeInjector(Arc<Probe>);
@@ -3518,6 +3633,7 @@ mod tests {
         let (p1, p2, p3) = (probe.clone(), probe.clone(), probe.clone());
         let backends = Backends {
             capture: Box::new(move |target, key, _, _| {
+                std::thread::sleep(Duration::from_millis(p1.capture_delay_ms.load(Ordering::SeqCst)));
                 p1.built.lock().unwrap().push((target.clone(), key.map(str::to_string)));
                 Box::new(FakeCapturer { probe: p1.clone(), region })
             }),
@@ -3669,6 +3785,25 @@ mod tests {
             assert_eq!(built[1].0, CaptureTarget::Virtual { width: 1600, height: 720, refresh_mhz: 60_000, density_dpi: 0 });
             assert_eq!(built[1].1.as_deref(), Some("dev1/virtual"));
         }
+        phone.finish().await;
+    }
+
+    /// A capture set-up that blocks longer than the phone's liveness timeout
+    /// still lets heartbeats through, and the host does not count the set-up
+    /// against the phone either.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_slow_capture_setup_keeps_the_link_alive() {
+        let probe = Arc::new(Probe::default());
+        probe.capture_delay_ms.store(LIVENESS_TIMEOUT.as_millis() as u64 + 500, Ordering::SeqCst);
+        let manager = test_manager(&probe, None, true);
+        let mut phone = Phone::connect(&manager, hello_for("dev1")).await;
+        ack_role(&mut phone).await;
+        phone.expect(|m| *m == Message::Heartbeat).await;
+        assert!(probe.built.lock().unwrap().is_empty(), "the heartbeat must arrive while capture is still being set up");
+        wait_until("the capturer", || probe.built.lock().unwrap().len() == 1).await;
+        phone.send(Message::Heartbeat).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(manager.lock_sessions().contains_key("dev1"), "the set-up time must not count as a silent phone");
         phone.finish().await;
     }
 

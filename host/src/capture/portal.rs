@@ -776,7 +776,7 @@ impl Portal {
         self.desktop
             .call_method(
                 "SelectSources",
-                &(&*session, select_sources_options_for(source_type, &handle_token, persist_mode, restore_token)),
+                &(&*session, select_sources_options_for(source_type, &handle_token, persist_mode, restore_token, multi_select_dialog(source_type, &desktop_name()))),
             )
             .map_err(|e| format!("{}: the D-Bus call failed: {e}", Stage::SelectSources))?;
 
@@ -1000,7 +1000,21 @@ pub fn select_sources_options(
     persist_mode: u32,
     restore_token: Option<&str>,
 ) -> Options {
-    select_sources_options_for(SOURCE_TYPE_MONITOR, handle_token, persist_mode, restore_token)
+    select_sources_options_for(SOURCE_TYPE_MONITOR, handle_token, persist_mode, restore_token, false)
+}
+
+fn desktop_name() -> String {
+    std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default()
+}
+
+/// Whether to ask for a multi-select dialog. KDE's single-select dialog
+/// accepts from the card's own click handler, and accepting a virtual screen
+/// creates an output, which rebuilds the card list under that handler; Qt then
+/// aborts the portal (xdg-desktop-portal-kde 6.7, Qt 6.12). In multi-select
+/// mode a click only ticks the card and the dialog's Share button accepts.
+/// There is only one virtual-screen card, so one stream still comes back.
+pub fn multi_select_dialog(source_type: u32, desktop: &str) -> bool {
+    source_type == SOURCE_TYPE_VIRTUAL && desktop.to_uppercase().contains("KDE")
 }
 
 /// [`select_sources_options`] for an explicit source type.
@@ -1009,11 +1023,12 @@ pub fn select_sources_options_for(
     handle_token: &str,
     persist_mode: u32,
     restore_token: Option<&str>,
+    multiple: bool,
 ) -> Options {
     let mut options = Options::new();
     options.insert("handle_token", Value::from(handle_token.to_string()));
     options.insert("types", Value::from(source_type));
-    options.insert("multiple", Value::from(false));
+    options.insert("multiple", Value::from(multiple));
     options.insert("persist_mode", Value::from(persist_mode));
     // 2 = embedded. Composites the cursor into the video frame so moving the mouse
     // triggers a new frame and the Android client can see it.
@@ -1047,8 +1062,8 @@ pub fn validate_node_id(node_id: u32) -> Result<u32, String> {
 
 /// Picks the stream to capture out of the portal's `streams` array.
 ///
-/// `multiple = false`, so this should only ever see one entry; if a portal
-/// ignores that, the first entry is the best guess and the extra ones are
+/// There is one entry, even with KDE's multi-select virtual-screen dialog
+/// (see [`multi_select_dialog`]); if a portal hands back more, the first entry is the best guess and the extra ones are
 /// reported rather than silently dropped.
 pub fn pick_stream(streams: &[StreamInfo]) -> Result<StreamInfo, String> {
     let Some(first) = streams.first().copied() else {
@@ -1062,7 +1077,7 @@ pub fn pick_stream(streams: &[StreamInfo]) -> Result<StreamInfo, String> {
 
     if streams.len() > 1 {
         log::warn!(
-            "the portal returned {} streams even though multiple=false; using the first \
+            "the portal returned {} streams where one was expected; using the first \
              (node id {})",
             streams.len(),
             first.node_id
@@ -1214,13 +1229,22 @@ mod tests {
         assert_eq!(SOURCE_TYPE_WINDOW, 2);
         assert_eq!(SOURCE_TYPE_VIRTUAL, 4);
         for t in [SOURCE_TYPE_MONITOR, SOURCE_TYPE_WINDOW, SOURCE_TYPE_VIRTUAL] {
-            let o = select_sources_options_for(t, "tok", PERSIST_MODE_UNTIL_REVOKED, Some("rt"));
+            let o = select_sources_options_for(t, "tok", PERSIST_MODE_UNTIL_REVOKED, Some("rt"), false);
             assert_eq!(o.get("types"), Some(&Value::from(t)));
             assert_eq!(o.get("multiple"), Some(&Value::from(false)));
             assert_eq!(o.get("restore_token"), Some(&Value::from("rt".to_string())));
             assert_eq!(o.get("persist_mode"), Some(&Value::from(PERSIST_MODE_UNTIL_REVOKED)));
         }
         assert_eq!(source_type_name(SOURCE_TYPE_VIRTUAL), "virtual monitor");
+    }
+
+    #[test]
+    fn only_a_kde_virtual_screen_gets_the_multi_select_dialog() {
+        assert!(multi_select_dialog(SOURCE_TYPE_VIRTUAL, "KDE"));
+        assert!(!multi_select_dialog(SOURCE_TYPE_MONITOR, "KDE"));
+        assert!(!multi_select_dialog(SOURCE_TYPE_VIRTUAL, "GNOME"));
+        let o = select_sources_options_for(SOURCE_TYPE_VIRTUAL, "tok", PERSIST_MODE_NONE, None, true);
+        assert_eq!(o.get("multiple"), Some(&Value::from(true)));
     }
 
     #[test]

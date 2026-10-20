@@ -253,6 +253,13 @@ pub fn read_default_sink_name() -> Option<String> {
     Some(rest[..rest.find('"')?].to_string())
 }
 
+/// Points the configured default output at `node_name` without a guard; the
+/// guard that first replaced the default still restores the original.
+pub fn set_default_sink(node_name: &str) -> bool {
+    let value = format!("{{\"name\":\"{node_name}\"}}");
+    run_metadata(&["0", DEFAULT_KEY, &value, "Spa:String:JSON"])
+}
+
 fn run_metadata(args: &[&str]) -> bool {
     Command::new("pw-metadata")
         .arg("-n")
