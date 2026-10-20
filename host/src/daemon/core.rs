@@ -91,6 +91,10 @@ pub fn load_settings(path: Option<&PathBuf>) -> GlobalSettings {
     }
 }
 
+fn apply_skip_pairing(manager: &SessionManager, settings: &GlobalSettings) {
+    manager.pairing().set_allow_unpaired(settings.skip_pairing || crate::transport::pairing::allow_unpaired_from_env());
+}
+
 impl DaemonCore {
     pub fn new(
         manager: Arc<SessionManager>,
@@ -102,6 +106,7 @@ impl DaemonCore {
         let (quit_tx, _) = watch::channel(false);
         let initial_settings = load_settings(settings_path.as_ref());
         crate::audio::sync::hub().set_enabled(initial_settings.audio_sync);
+        apply_skip_pairing(&manager, &initial_settings);
         Arc::new(Self {
             manager,
             logs,
@@ -462,6 +467,7 @@ impl DaemonCore {
             }
         }
         crate::audio::sync::hub().set_enabled(new.audio_sync);
+        apply_skip_pairing(&self.manager, &new);
         self.emit_settings();
         let server_changed = (old.port, old.target_fps, old.bitrate_mbps) != (new.port, new.target_fps, new.bitrate_mbps);
         if server_changed && lock(&self.server).running {
@@ -687,6 +693,17 @@ mod tests {
         let bad = GlobalSettings { port: 0, ..Default::default() };
         assert!(core.handle(Request::SetGlobalSettings { settings: bad }).await.is_err());
         assert!(core.handle(Request::Wifi { op: "nonsense".into(), args: serde_json::Value::Null }).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn the_skip_pairing_setting_switches_pairing_off_and_on() {
+        let core = core_with(&["dev1"]);
+        assert!(!core.manager.pairing().allow_unpaired());
+        let on = GlobalSettings { skip_pairing: true, ..Default::default() };
+        core.handle(Request::SetGlobalSettings { settings: on }).await.unwrap();
+        assert!(core.manager.pairing().allow_unpaired());
+        core.handle(Request::SetGlobalSettings { settings: GlobalSettings::default() }).await.unwrap();
+        assert!(!core.manager.pairing().allow_unpaired());
     }
 
     #[tokio::test]

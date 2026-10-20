@@ -276,11 +276,14 @@ pub struct GlobalSettings {
     /// Keep all phones' audio in step: every phone delays to match the
     /// slowest one (see `audio::sync`).
     pub audio_sync: bool,
+    /// Let any phone that reaches the port in without a PIN or token (still
+    /// over TLS). Anyone on the network can then use this PC's screen and input.
+    pub skip_pairing: bool,
 }
 
 impl Default for GlobalSettings {
     fn default() -> Self {
-        Self { port: 9999, target_fps: 60, bitrate_mbps: 20, default_role: None, autostart_server: true, audio_sync: false }
+        Self { port: 9999, target_fps: 60, bitrate_mbps: 20, default_role: None, autostart_server: true, audio_sync: false, skip_pairing: false }
     }
 }
 

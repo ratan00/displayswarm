@@ -672,6 +672,7 @@ export component MainWindow inherits Window {
     // 0 = ask every time, otherwise 1 + index into role-names
     in-out property <int> default-role-index: 0;
     in-out property <bool> audio-sync: false;
+    in-out property <bool> skip-pairing: false;
     in-out property <bool> start-on-login: false;
     in-out property <string> encoder-text: "probing\u{2026}";
     in-out property <string> transports-text: "";
@@ -704,6 +705,7 @@ export component MainWindow inherits Window {
     callback apply-settings();
     callback sync-audio-now();
     callback set-start-on-login(bool);
+    callback set-skip-pairing(bool);
     callback refresh-diagnostics();
     callback refresh-logs();
     callback copy-report();
@@ -1046,10 +1048,20 @@ export component MainWindow inherits Window {
                             action: "Open port";
                             activated => { root.open-firewall(); }
                         }
+                        ToggleRow {
+                            title: "Skip pairing";
+                            subtitle: root.skip-pairing ? "Any device on this network can connect and control this PC." : "New devices must pair with a PIN or QR code.";
+                            checked: root.skip-pairing;
+                            toggled(v) => { root.set-skip-pairing(v); }
+                        }
+                        if root.skip-pairing: Callout {
+                            text: "Pairing is off. Only use this on a network you trust.";
+                            tint: Theme.warn;
+                        }
                         HorizontalLayout {
                             spacing: 8px;
                             alignment: start;
-                            Button { text: "Pair a device (PIN)"; clicked => { root.start-pairing(); } }
+                            Button { text: "Pair a device (PIN)"; enabled: !root.skip-pairing; clicked => { root.start-pairing(); } }
                             Button { text: "Refresh"; clicked => { root.refresh-wifi(); } }
                         }
                     }

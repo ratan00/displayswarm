@@ -273,6 +273,13 @@ pub struct PairingManager {
 /// `DISPLAYSWARM_ALLOW_UNPAIRED=1` turns pairing off: any phone that can reach the port is let in.
 pub const ALLOW_UNPAIRED_ENV: &str = "DISPLAYSWARM_ALLOW_UNPAIRED";
 
+/// Whether [`ALLOW_UNPAIRED_ENV`] is set. It overrides the "Skip pairing" setting.
+pub fn allow_unpaired_from_env() -> bool {
+    std::env::var(ALLOW_UNPAIRED_ENV)
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
 /// What `handle_request` decided.
 #[derive(Debug, PartialEq)]
 pub struct Decision {
@@ -302,19 +309,22 @@ impl PairingManager {
             log::warn!("Trust store unavailable ({e}); pairings will last only for this run");
             TrustStore::in_memory()
         }));
-        let on = std::env::var(ALLOW_UNPAIRED_ENV)
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-            .unwrap_or(false);
-        m.set_allow_unpaired(on);
+        m.set_allow_unpaired(allow_unpaired_from_env());
         m
     }
 
     /// Lets every phone in without pairing. Anyone on the network can then use this PC's screen and input.
     pub fn set_allow_unpaired(&self, on: bool) {
-        if on {
-            log::warn!("{ALLOW_UNPAIRED_ENV}: pairing is OFF; any phone on the network can connect");
+        let was = self.allow_unpaired.swap(on, Ordering::Relaxed);
+        if on && !was {
+            log::warn!("Pairing is OFF: any phone on the network can connect");
+        } else if was && !on {
+            log::info!("Pairing is on again");
         }
-        self.allow_unpaired.store(on, Ordering::Relaxed);
+    }
+
+    pub fn allow_unpaired(&self) -> bool {
+        self.allow_unpaired.load(Ordering::Relaxed)
     }
 
     /// Registers the UI callback (any thread; keep it cheap).

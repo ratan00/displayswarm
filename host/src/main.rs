@@ -230,6 +230,7 @@ fn apply_settings_fields(ui: &MainWindow, s: &GlobalSettings) {
         .unwrap_or(0);
     ui.set_default_role_index(idx);
     ui.set_audio_sync(s.audio_sync);
+    ui.set_skip_pairing(s.skip_pairing);
     STATE.with(|st| st.borrow_mut().settings = s.clone());
 }
 
@@ -664,6 +665,19 @@ fn wire_callbacks(ui: &MainWindow) {
                 ui.set_settings_status("Re-measuring audio latency...".into());
             }
             call(&weak, Request::SyncAudioNow, |_| Some(UiMsg::Note("Audio re-synced".into())));
+        }
+    });
+    ui.on_set_skip_pairing({
+        let weak = weak.clone();
+        let ui_weak = ui.as_weak();
+        move |on| {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_skip_pairing(on);
+            }
+            // The saved settings, not the form: unapplied edits elsewhere stay unapplied.
+            let mut s = STATE.with(|st| st.borrow().settings.clone());
+            s.skip_pairing = on;
+            call(&weak, Request::SetGlobalSettings { settings: s }, |_| None);
         }
     });
     ui.on_set_start_on_login({
