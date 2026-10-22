@@ -271,6 +271,11 @@ class VideoDecoder(surface: Surface) {
         val format = MediaFormat.createVideoFormat(mime, width, height).apply {
             setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
             setInteger(MediaFormat.KEY_PRIORITY, 0) // Realtime
+            // Qualcomm OMX decoders ignore KEY_LOW_LATENCY and hold ~4 frames
+            // (~70 ms at 60 fps) unless told the stream has no reordering.
+            // Other decoders ignore unknown vendor keys.
+            setInteger("vendor.qti-ext-dec-picture-order.enable", 1)
+            setInteger("vendor.qti-ext-dec-low-latency.enable", 1)
             cachedCsd0?.let { setByteBuffer("csd-0", ByteBuffer.wrap(it)) }
             cachedCsd1?.let { setByteBuffer("csd-1", ByteBuffer.wrap(it)) }
         }
