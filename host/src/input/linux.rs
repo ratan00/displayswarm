@@ -855,6 +855,14 @@ pub struct LinuxUinputInjector {
     rel_frac: (f32, f32),
     /// A KWin output binding that failed and is retried on later events.
     kwin_pending: Option<(Option<crate::display::OutputRegion>, std::time::Instant)>,
+    /// X11: the (region, desktop bounds) the devices' matrix maps onto, while
+    /// that mapping is in force.
+    x11_target: Option<Option<(crate::display::OutputRegion, crate::display::OutputRegion)>>,
+    /// X11: when to set the matrix again (a device X had not registered yet,
+    /// or the pen's tool device that appears on first proximity).
+    x11_retry: Option<std::time::Instant>,
+    /// X11: retries left for the current region.
+    x11_tries_left: u8,
     /// Whether the touch-down emulating a mouse click (the fallback used when no
     /// virtual mouse could be created) is currently held. Kept apart from
     /// `active_slots` because a mouse pointer_id is 0, the same slot a first
@@ -964,6 +972,9 @@ impl LinuxUinputInjector {
             mouse_buttons: 0,
             rel_frac: (0.0, 0.0),
             kwin_pending: None,
+            x11_target: None,
+            x11_retry: None,
+            x11_tries_left: 0,
             mouse_touch_active: false,
             pressed_modifiers: 0,
         })
@@ -1542,6 +1553,71 @@ impl LinuxUinputInjector {
         }
     }
 
+    /// X11: sets the devices' transformation matrix so X itself maps them onto
+    /// `target` (region, desktop bounds), overriding what the desktop's settings
+    /// daemon pinned them to (Cinnamon puts unmapped touchscreens on the
+    /// primary output). X registers new devices a moment after they are
+    /// created, so a device it does not know yet keeps the scaling and the
+    /// mapping is retried on later events.
+    fn map_x11(&mut self, target: Option<(crate::display::OutputRegion, crate::display::OutputRegion)>) {
+        let m = super::x11_map::matrix(target);
+        let devices = [
+            ("pen", self.pen_file.as_ref().and_then(super::kwin::event_node)),
+            ("touch", self.touch_file.as_ref().and_then(super::kwin::event_node)),
+        ];
+        let nodes: Vec<String> = devices.iter().filter_map(|(_, n)| n.clone()).collect();
+        let found = match super::x11_map::set_matrix(&nodes, m) {
+            Ok(found) => found,
+            Err(e) => {
+                log::warn!("X11: could not set the input matrix: {e}");
+                Vec::new()
+            }
+        };
+        for (label, node) in &devices {
+            let mapped = node.as_ref().is_some_and(|n| found.contains(n));
+            if mapped {
+                log::info!("X11: {label} ({}) mapped with matrix {m:?}", node.as_deref().unwrap_or(""));
+            }
+            match *label {
+                "pen" => self.pen_mapped = mapped,
+                _ => self.touch_mapped = mapped,
+            }
+        }
+        let all = (self.pen_mapped || self.pen_file.is_none()) && (self.touch_mapped || self.touch_file.is_none());
+        // `scaled` skips the region for mapped devices; the rest keep it.
+        self.region = if all { None } else { target };
+        self.x11_target = Some(target);
+        self.x11_retry = None;
+        if !all {
+            if self.x11_tries_left == 0 {
+                log::warn!("X11: gave up mapping the input devices; unmapped ones are scaled into the desktop box");
+            }
+            self.schedule_x11_retry(std::time::Duration::from_millis(300));
+        }
+    }
+
+    /// Sets the matrix again after `delay`, while tries are left.
+    fn schedule_x11_retry(&mut self, delay: std::time::Duration) {
+        if self.x11_retry.is_none() && self.x11_tries_left > 0 {
+            self.x11_tries_left -= 1;
+            self.x11_retry = Some(std::time::Instant::now() + delay);
+        }
+    }
+
+    /// Runs a scheduled X11 mapping retry. X only adds a libinput tablet on
+    /// the pen's first proximity, so while the pen is unmapped a pen event
+    /// retries soon, to map it early in that first stroke.
+    fn retry_x11_map(&mut self, pen_event: bool) {
+        let Some(target) = self.x11_target else { return };
+        if pen_event && !self.pen_mapped {
+            self.x11_retry = self.x11_retry.map(|at| at.min(std::time::Instant::now() + std::time::Duration::from_millis(50)));
+            self.schedule_x11_retry(std::time::Duration::from_millis(50));
+        }
+        if self.x11_retry.is_some_and(|at| std::time::Instant::now() >= at) {
+            self.map_x11(target);
+        }
+    }
+
     /// Resets the GNOME `output` keys this injector set.
     fn unmap_gnome(&mut self) {
         use super::gnome::{self, Kind};
@@ -1640,9 +1716,11 @@ impl InputInjector for LinuxUinputInjector {
     /// pen devices are bound to the output at `region` instead and coordinates
     /// stay as they are. `None` unbinds them (KWin's default output).
     ///
-    /// X11 (any desktop): X maps each absolute device over the whole root
-    /// window, so coordinates are scaled into `region` within the root window
-    /// (the X11 layout backend's `desktop_bounds`), from RandR's geometry.
+    /// X11 (any desktop): each device's "Coordinate Transformation Matrix" is
+    /// set to map it onto `region` within the root window, replacing whatever
+    /// the desktop's settings daemon set (Cinnamon maps touchscreens onto the
+    /// primary output). A device X has not registered yet is scaled into
+    /// `region` within the root window (RandR's geometry) until it can be set.
     fn set_output_region(&mut self, region: Option<crate::display::OutputRegion>) {
         use crate::display::model::{Desktop, SessionType};
         let desktop = match crate::display::env::current_session() {
@@ -1663,6 +1741,12 @@ impl InputInjector for LinuxUinputInjector {
             _ => {
                 self.unmap_gnome();
                 self.region = region.and_then(|r| crate::display::layout::current().desktop_bounds().map(|b| (r, b)));
+                self.x11_target = None;
+                self.x11_retry = None;
+                self.x11_tries_left = 10;
+                if matches!(desktop, Desktop::X11Generic) {
+                    self.map_x11(self.region);
+                }
             }
         }
     }
@@ -1707,12 +1791,14 @@ impl InputInjector for LinuxUinputInjector {
         age_us: u32,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.retry_kwin_bind();
+        self.retry_x11_map(true);
         self.inject_pen(event, age_us);
         Ok(())
     }
 
     fn inject(&mut self, event: &InputEvent) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.retry_kwin_bind();
+        self.retry_x11_map(event.event_type == INPUT_TYPE_STYLUS);
         // A device GNOME maps to the monitor itself takes the phone's own
         // coordinates; the others are scaled into the monitor's part of the
         // desktop box.
@@ -2790,5 +2876,40 @@ mod tests {
         assert_eq!(history_stamp(now, 50_000, now - 8_000), now - 8_000);
         // A stale previous stamp cannot push past now.
         assert_eq!(history_stamp(now, 0, now + 5), now);
+    }
+
+    /// X11 only: with the virtual monitor at the right of the desktop, a touch
+    /// at the phone's centre must land at the centre of that monitor, not on
+    /// the primary one. Needs a running X session and /dev/uinput.
+    /// `cargo test --release --lib live_x11_touch_lands_on_region -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn live_x11_touch_lands_on_region() {
+        use crate::display::OutputRegion;
+        let bounds = crate::display::layout::current().desktop_bounds().expect("layout");
+        let region = OutputRegion { x: bounds.x + bounds.width as i32 - 2000, y: 0, width: 2000, height: 1200 };
+        let mut inj = LinuxUinputInjector::new(2000, 1200).expect("uinput");
+        inj.set_output_region(Some(region));
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        let mut ev = InputEvent {
+            event_type: crate::protocol::INPUT_TYPE_TOUCH,
+            pointer_id: 0,
+            action: ACTION_DOWN,
+            flags: 0,
+            x_norm: 0.5,
+            y_norm: 0.5,
+            pressure: 1.0,
+            tilt_x: 0.0,
+            tilt_y: 0.0,
+        };
+        inj.inject(&ev).unwrap();
+        ev.action = ACTION_UP;
+        inj.inject(&ev).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let out = std::process::Command::new("xdotool").arg("getmouselocation").output().unwrap();
+        println!("region {region:?}; pointer {}", String::from_utf8_lossy(&out.stdout));
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        let x: i32 = text.split("x:").nth(1).unwrap().split_whitespace().next().unwrap().parse().unwrap();
+        assert!((x - (region.x + 1000)).abs() < 40, "pointer x {x} is not at the middle of {region:?}");
     }
 }

@@ -80,7 +80,7 @@ futures-util = "0.3"
 evdev = "0.12"
 # X11 sessions (M5): the RandR layout, its change events and the spare-output
 # probe. Pure Rust connection; already in the tree through slint/winit.
-x11rb = { version = "0.13", features = ["randr"] }
+x11rb = { version = "0.13", features = ["randr", "xinput"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [

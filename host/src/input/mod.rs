@@ -7,6 +7,8 @@ pub mod gnome;
 pub mod kwin;
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "linux")]
+pub mod x11_map;
 
 #[cfg(target_os = "windows")]
 pub mod windows;
