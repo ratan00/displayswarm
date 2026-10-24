@@ -11,8 +11,8 @@ android {
         applicationId = "com.displayswarm.client"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "0.3.1"
         ndk {
             // Phones (64- and 32-bit ARM) and the x86_64 emulator.
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
