@@ -68,14 +68,30 @@ pub fn split_parameter_sets(data: &[u8]) -> (Vec<u8>, Vec<u8>) {
 pub struct Packetizer {
     /// Last SPS+PPS seen, reused if a keyframe arrives without in-band headers.
     config: Vec<u8>,
+    /// Colour signalling every SPS must carry; see [`Packetizer::with_signal`].
+    signal: Option<VideoSignal>,
 }
 
 impl Packetizer {
+    /// A packetizer that writes `signal` into any SPS that does not already
+    /// carry it. Media Foundation leaves the VUI colour fields out whatever
+    /// the codec context says, and the phone would then have to guess.
+    pub fn with_signal(signal: VideoSignal) -> Self {
+        Self { config: Vec::new(), signal: Some(signal) }
+    }
+
     /// Seeds the parameter sets from out-of-band headers (extradata / `x264_encoder_headers`).
     pub fn set_config(&mut self, headers: &[u8]) {
         let (params, _) = split_parameter_sets(headers);
         if !params.is_empty() {
-            self.config = params;
+            self.config = self.signalled(params);
+        }
+    }
+
+    fn signalled(&self, params: Vec<u8>) -> Vec<u8> {
+        match &self.signal {
+            Some(sig) => set_sps_video_signal(&params, sig),
+            None => params,
         }
     }
 
@@ -85,7 +101,7 @@ impl Packetizer {
         }
         let (params, rest) = split_parameter_sets(&data);
         if !params.is_empty() {
-            self.config = params;
+            self.config = self.signalled(params);
         }
         let mut out = Vec::with_capacity(2);
         if !self.config.is_empty() {
@@ -134,6 +150,15 @@ impl IdrScheduler {
     }
 }
 
+/// The VUI video signal: range and the H.273 colour code points.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VideoSignal {
+    pub full_range: bool,
+    pub primaries: u8,
+    pub transfer: u8,
+    pub matrix: u8,
+}
+
 /// What [`parse_sps_vui`] extracts from an SPS, for tests.
 #[cfg(test)]
 #[derive(Debug)]
@@ -146,13 +171,11 @@ pub struct SpsInfo {
     pub full_range: bool,
 }
 
-#[cfg(test)]
 struct Bits<'a> {
     d: &'a [u8],
     pos: usize,
 }
 
-#[cfg(test)]
 impl Bits<'_> {
     fn bit(&mut self) -> Option<u32> {
         let b = *self.d.get(self.pos / 8)? >> (7 - self.pos % 8) & 1;
@@ -182,25 +205,68 @@ impl Bits<'_> {
     }
 }
 
-/// Minimal SPS parser (Annex-B input, first SPS NAL) that reaches the VUI colour
-/// fields. Returns None if the SPS is malformed or uses scaling lists.
-#[cfg(test)]
-pub fn parse_sps_vui(annexb: &[u8]) -> Option<SpsInfo> {
-    let starts = nal_starts(annexb);
-    let &(_, hdr) = starts.iter().find(|&&(_, h)| annexb.get(h).map(|b| b & 0x1f) == Some(NAL_SPS))?;
-    let end = starts.iter().map(|s| s.0).find(|&s| s > hdr).unwrap_or(annexb.len());
-    // Strip emulation-prevention bytes (00 00 03 -> 00 00).
-    let mut rbsp = Vec::new();
-    let mut zeros = 0;
-    for &b in &annexb[hdr + 1..end] {
-        if zeros >= 2 && b == 3 {
-            zeros = 0;
-            continue;
+#[derive(Default)]
+struct BitWriter {
+    d: Vec<u8>,
+    n: usize,
+}
+
+impl BitWriter {
+    fn bit(&mut self, b: u32) {
+        if self.n % 8 == 0 {
+            self.d.push(0);
         }
-        zeros = if b == 0 { zeros + 1 } else { 0 };
-        rbsp.push(b);
+        if b & 1 == 1 {
+            *self.d.last_mut().unwrap() |= 0x80 >> (self.n % 8);
+        }
+        self.n += 1;
     }
-    let mut r = Bits { d: &rbsp, pos: 0 };
+    fn u(&mut self, n: usize, v: u32) {
+        for i in (0..n).rev() {
+            self.bit(v >> i);
+        }
+    }
+    fn ue(&mut self, v: u32) {
+        let x = v as u64 + 1;
+        let len = 64 - x.leading_zeros() as usize;
+        for _ in 1..len {
+            self.bit(0);
+        }
+        for i in (0..len).rev() {
+            self.bit((x >> i) as u32);
+        }
+    }
+    /// Copies bits `from..to` of `src`.
+    fn copy(&mut self, src: &[u8], from: usize, to: usize) {
+        let mut r = Bits { d: src, pos: from };
+        while r.pos < to {
+            self.bit(r.bit().unwrap_or(0));
+        }
+    }
+    /// rbsp_trailing_bits: a stop bit, then zeros to the byte boundary.
+    fn finish(mut self) -> Vec<u8> {
+        self.bit(1);
+        self.d
+    }
+}
+
+/// The SPS fields up to `vui_parameters_present_flag`.
+struct SpsHead {
+    #[cfg_attr(not(test), allow(dead_code))]
+    profile_idc: u8,
+    #[cfg_attr(not(test), allow(dead_code))]
+    width: u32,
+    #[cfg_attr(not(test), allow(dead_code))]
+    height: u32,
+    max_num_ref_frames: u32,
+    /// Bit position of `vui_parameters_present_flag`.
+    vui_flag: usize,
+}
+
+/// Walks an SPS RBSP (after the NAL header byte) to its VUI flag. None if it
+/// is malformed or uses scaling lists (which this walker does not parse).
+fn sps_head(rbsp: &[u8]) -> Option<SpsHead> {
+    let mut r = Bits { d: rbsp, pos: 0 };
     let profile_idc = r.u(8)? as u8;
     r.u(16)?; // constraint flags + level_idc
     r.ue()?; // sps id
@@ -213,7 +279,7 @@ pub fn parse_sps_vui(annexb: &[u8]) -> Option<SpsInfo> {
         r.ue()?;
         r.bit()?;
         if r.bit()? == 1 {
-            return None; // scaling matrices not supported by this helper
+            return None; // scaling matrices
         }
     }
     r.ue()?; // log2_max_frame_num - 4
@@ -231,7 +297,7 @@ pub fn parse_sps_vui(annexb: &[u8]) -> Option<SpsInfo> {
         }
         _ => {}
     }
-    r.ue()?; // max_num_ref_frames
+    let max_num_ref_frames = r.ue()?;
     r.bit()?;
     let w_mbs = r.ue()? + 1;
     let h_map = r.ue()? + 1;
@@ -250,21 +316,161 @@ pub fn parse_sps_vui(annexb: &[u8]) -> Option<SpsInfo> {
     let mult = if frame_mbs_only == 1 { 2 } else { 4 };
     let width = w_mbs * 16 - (cl + cr) * 2;
     let height = (2 - frame_mbs_only) * h_map * 16 - (ct + cb) * mult;
-    let mut info = SpsInfo { profile_idc, width, height, colour: None, full_range: false };
+    Some(SpsHead { profile_idc, width, height, max_num_ref_frames, vui_flag: r.pos })
+}
+
+/// The VUI's video signal as found: video_format, the signal (unspecified code
+/// points if not described) and whether the colour description is present.
+type FoundSignal = (u32, VideoSignal, bool);
+
+/// Reads the VUI (from just after its present flag) up to and including the
+/// video signal. Returns the bit range of `video_signal_type_present_flag` and
+/// its fields, and the signal if present; `r` is left after it.
+fn vui_signal(r: &mut Bits) -> Option<(usize, usize, Option<FoundSignal>)> {
+    if r.bit()? == 1 && r.u(8)? == 255 {
+        r.u(32)?; // sar width/height
+    }
+    if r.bit()? == 1 {
+        r.bit()?; // overscan_appropriate
+    }
+    let start = r.pos;
+    let mut found = None;
+    if r.bit()? == 1 {
+        let format = r.u(3)?;
+        let full_range = r.bit()? == 1;
+        let described = r.bit()? == 1;
+        // 2 = unspecified.
+        let (primaries, transfer, matrix) =
+            if described { (r.u(8)? as u8, r.u(8)? as u8, r.u(8)? as u8) } else { (2, 2, 2) };
+        found = Some((format, VideoSignal { full_range, primaries, transfer, matrix }, described));
+    }
+    Some((start, r.pos, found))
+}
+
+fn write_signal(w: &mut BitWriter, format: u32, sig: &VideoSignal) {
+    w.bit(1); // video_signal_type_present_flag
+    w.u(3, format);
+    w.bit(sig.full_range as u32);
+    w.bit(1); // colour_description_present_flag
+    w.u(8, sig.primaries as u32);
+    w.u(8, sig.transfer as u32);
+    w.u(8, sig.matrix as u32);
+}
+
+/// Rewrites one SPS RBSP so its VUI carries `sig`. None if it already does,
+/// or if the SPS cannot be parsed (it is then passed on unchanged).
+fn rewrite_sps_rbsp(rbsp: &[u8], sig: &VideoSignal) -> Option<Vec<u8>> {
+    let head = sps_head(rbsp)?;
+    // The payload ends at the rbsp stop bit, the last 1 in the buffer.
+    let last = rbsp.iter().rposition(|&b| b != 0)?;
+    let stop = last * 8 + 7 - rbsp[last].trailing_zeros() as usize;
+    let mut r = Bits { d: rbsp, pos: head.vui_flag };
+    let mut w = BitWriter::default();
+    w.copy(rbsp, 0, head.vui_flag);
+    if r.bit()? == 0 {
+        // No VUI: add one with the signal, plus a bitstream restriction saying
+        // frames come out in decode order (no reorder delay at the decoder).
+        w.bit(1);
+        w.bit(0); // aspect_ratio_info_present_flag
+        w.bit(0); // overscan_info_present_flag
+        write_signal(&mut w, 5, sig); // 5 = unspecified video format
+        w.bit(0); // chroma_loc_info_present_flag
+        w.bit(0); // timing_info_present_flag
+        w.bit(0); // nal_hrd_parameters_present_flag
+        w.bit(0); // vcl_hrd_parameters_present_flag
+        w.bit(0); // pic_struct_present_flag
+        w.bit(1); // bitstream_restriction_flag
+        w.bit(1); // motion_vectors_over_pic_boundaries_flag
+        w.ue(2); // max_bytes_per_pic_denom
+        w.ue(1); // max_bits_per_mb_denom
+        w.ue(16); // log2_max_mv_length_horizontal
+        w.ue(16); // log2_max_mv_length_vertical
+        w.ue(0); // max_num_reorder_frames
+        w.ue(head.max_num_ref_frames); // max_dec_frame_buffering
+        return Some(w.finish());
+    }
+    w.bit(1);
+    let vui_start = r.pos;
+    let (sig_start, sig_end, found) = vui_signal(&mut r)?;
+    if let Some((_, have, true)) = found {
+        if have == *sig {
+            return None;
+        }
+    }
+    w.copy(rbsp, vui_start, sig_start);
+    write_signal(&mut w, found.map_or(5, |f| f.0), sig);
+    w.copy(rbsp, sig_end, stop);
+    Some(w.finish())
+}
+
+/// Strips emulation-prevention bytes (00 00 03 -> 00 00).
+fn unescape(ebsp: &[u8]) -> Vec<u8> {
+    let mut rbsp = Vec::with_capacity(ebsp.len());
+    let mut zeros = 0;
+    for &b in ebsp {
+        if zeros >= 2 && b == 3 {
+            zeros = 0;
+            continue;
+        }
+        zeros = if b == 0 { zeros + 1 } else { 0 };
+        rbsp.push(b);
+    }
+    rbsp
+}
+
+/// Inserts emulation-prevention bytes so no start code appears in the payload.
+fn escape(rbsp: &[u8], out: &mut Vec<u8>) {
+    let mut zeros = 0;
+    for &b in rbsp {
+        if zeros >= 2 && b <= 3 {
+            out.push(3);
+            zeros = 0;
+        }
+        zeros = if b == 0 { zeros + 1 } else { 0 };
+        out.push(b);
+    }
+}
+
+/// Makes every SPS in an Annex-B buffer signal `sig` in its VUI. Other NAL
+/// units, and SPSs that already do (or cannot be parsed), are copied unchanged.
+pub fn set_sps_video_signal(annexb: &[u8], sig: &VideoSignal) -> Vec<u8> {
+    let starts = nal_starts(annexb);
+    let Some(&(first, _)) = starts.first() else { return annexb.to_vec() };
+    let mut out = Vec::with_capacity(annexb.len() + 8);
+    out.extend_from_slice(&annexb[..first]);
+    for (n, &(sc, hdr)) in starts.iter().enumerate() {
+        let end = starts.get(n + 1).map(|s| s.0).unwrap_or(annexb.len());
+        let is_sps = annexb.get(hdr).map(|b| b & 0x1f) == Some(NAL_SPS);
+        match is_sps.then(|| rewrite_sps_rbsp(&unescape(&annexb[hdr + 1..end]), sig)).flatten() {
+            Some(rbsp) => {
+                out.extend_from_slice(&annexb[sc..=hdr]);
+                escape(&rbsp, &mut out);
+            }
+            None => out.extend_from_slice(&annexb[sc..end]),
+        }
+    }
+    out
+}
+
+/// Minimal SPS parser (Annex-B input, first SPS NAL) that reaches the VUI colour
+/// fields. Returns None if the SPS is malformed or uses scaling lists.
+#[cfg(test)]
+pub fn parse_sps_vui(annexb: &[u8]) -> Option<SpsInfo> {
+    let starts = nal_starts(annexb);
+    let &(_, hdr) = starts.iter().find(|&&(_, h)| annexb.get(h).map(|b| b & 0x1f) == Some(NAL_SPS))?;
+    let end = starts.iter().map(|s| s.0).find(|&s| s > hdr).unwrap_or(annexb.len());
+    let rbsp = unescape(&annexb[hdr + 1..end]);
+    let head = sps_head(&rbsp)?;
+    let mut info =
+        SpsInfo { profile_idc: head.profile_idc, width: head.width, height: head.height, colour: None, full_range: false };
+    let mut r = Bits { d: &rbsp, pos: head.vui_flag };
     if r.bit()? == 0 {
         return Some(info); // no VUI
     }
-    if r.bit()? == 1 && r.u(8)? == 255 {
-        r.u(32)?;
-    }
-    if r.bit()? == 1 {
-        r.bit()?;
-    }
-    if r.bit()? == 1 {
-        r.u(3)?;
-        info.full_range = r.bit()? == 1;
-        if r.bit()? == 1 {
-            info.colour = Some((r.u(8)? as u8, r.u(8)? as u8, r.u(8)? as u8));
+    if let (_, _, Some((_, sig, described))) = vui_signal(&mut r)? {
+        info.full_range = sig.full_range;
+        if described {
+            info.colour = Some((sig.primaries, sig.transfer, sig.matrix));
         }
     }
     Some(info)
@@ -311,6 +517,104 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].frame_type, FRAME_TYPE_DELTA);
         assert_eq!(out[0].data, d);
+    }
+
+    const BT709: VideoSignal = VideoSignal { full_range: false, primaries: 1, transfer: 1, matrix: 1 };
+
+    /// SPS from Windows Media Foundation (`h264_mf`, 640x384): a VUI with
+    /// timing info but no video signal.
+    const MF_SPS: &[u8] = &[
+        0, 0, 0, 1, 0x67, 0x42, 0xc0, 0x1f, 0x95, 0xa0, 0x28, 0x0c, 0x68, 0x40, 0x00, 0x00, 0x03, 0x00, 0x40, 0x00,
+        0x00, 0x1e, 0x03, 0x68, 0x22, 0x11, 0xa8,
+    ];
+    /// SPS from libx264 (640x384, High) signalling only the matrix: (2, 2, 1).
+    const X264_SPS: &[u8] = &[
+        0, 0, 0, 1, 0x67, 0x64, 0x00, 0x1f, 0xac, 0xb4, 0x05, 0x01, 0x8d, 0x80, 0xb5, 0x02, 0x02, 0x01, 0x40, 0x00,
+        0x00, 0x03, 0x00, 0x40, 0x00, 0x00, 0x1e, 0x23, 0xc6, 0x0c, 0xa8,
+    ];
+
+    /// The VUI after the video signal (timing etc.) as raw bits, to check it survives a rewrite.
+    fn vui_tail(annexb: &[u8]) -> Vec<u32> {
+        let rbsp = unescape(&annexb[5..]);
+        let head = sps_head(&rbsp).unwrap();
+        let mut r = Bits { d: &rbsp, pos: head.vui_flag + 1 };
+        vui_signal(&mut r).unwrap();
+        let last = rbsp.iter().rposition(|&b| b != 0).unwrap();
+        let stop = last * 8 + 7 - rbsp[last].trailing_zeros() as usize;
+        (r.pos..stop).map(|_| r.bit().unwrap()).collect()
+    }
+
+    #[test]
+    fn media_foundation_sps_gains_the_colour_description() {
+        assert_eq!(parse_sps_vui(MF_SPS).unwrap().colour, None);
+        let out = set_sps_video_signal(MF_SPS, &BT709);
+        let info = parse_sps_vui(&out).unwrap();
+        assert_eq!((info.width, info.height, info.profile_idc), (640, 384, 66));
+        assert_eq!(info.colour, Some((1, 1, 1)));
+        assert!(!info.full_range);
+        assert_eq!(vui_tail(&out), vui_tail(MF_SPS), "timing info and the rest of the VUI are kept");
+    }
+
+    #[test]
+    fn a_different_signal_is_rewritten_in_place() {
+        assert_eq!(parse_sps_vui(X264_SPS).unwrap().colour, Some((2, 2, 1)));
+        let out = set_sps_video_signal(X264_SPS, &BT709);
+        let info = parse_sps_vui(&out).unwrap();
+        assert_eq!((info.width, info.height, info.profile_idc), (640, 384, 100));
+        assert_eq!(info.colour, Some((1, 1, 1)));
+        assert_eq!(vui_tail(&out), vui_tail(X264_SPS));
+        let full = VideoSignal { full_range: true, ..BT709 };
+        assert!(parse_sps_vui(&set_sps_video_signal(X264_SPS, &full)).unwrap().full_range);
+    }
+
+    #[test]
+    fn sps_already_signalling_the_colour_is_untouched() {
+        let once = set_sps_video_signal(MF_SPS, &BT709);
+        assert_eq!(set_sps_video_signal(&once, &BT709), once);
+    }
+
+    #[test]
+    fn sps_without_vui_gets_one() {
+        // Baseline 640x384, poc type 2, one reference frame, no VUI.
+        let mut w = BitWriter::default();
+        w.u(8, 66);
+        w.u(8, 0xc0);
+        w.u(8, 31);
+        w.ue(0); // sps id
+        w.ue(0); // log2_max_frame_num - 4
+        w.ue(2); // poc type
+        w.ue(1); // max_num_ref_frames
+        w.bit(0);
+        w.ue(39); // 640 / 16 - 1
+        w.ue(23); // 384 / 16 - 1
+        w.bit(1); // frame_mbs_only
+        w.bit(1); // direct_8x8_inference
+        w.bit(0); // no cropping
+        w.bit(0); // no VUI
+        let mut sps = vec![0, 0, 0, 1, 0x67];
+        escape(&w.finish(), &mut sps);
+        assert_eq!(parse_sps_vui(&sps).unwrap().colour, None);
+
+        let out = set_sps_video_signal(&sps, &BT709);
+        let info = parse_sps_vui(&out).unwrap();
+        assert_eq!((info.width, info.height), (640, 384));
+        assert_eq!(info.colour, Some((1, 1, 1)));
+        // ffmpeg's h264 parser reads the same VUI back, see the bench test on h264_mf.
+    }
+
+    #[test]
+    fn rewrite_keeps_other_nals_and_escapes_the_payload() {
+        let pps = nal(8, 3, false);
+        let idr = nal(5, 10, true);
+        let au: Vec<u8> = [MF_SPS, &pps, &idr].concat();
+        let out = set_sps_video_signal(&au, &BT709);
+        assert!(out.ends_with(&[pps.as_slice(), idr.as_slice()].concat()));
+        // No start code may appear inside the rewritten SPS.
+        let sps_len = out.len() - pps.len() - idr.len();
+        assert!(!out[4..sps_len].windows(3).any(|w| w == [0, 0, 1] || w == [0, 0, 0]));
+        let mut p = Packetizer::with_signal(BT709);
+        let pk = p.packetize(au, true, 0);
+        assert_eq!(parse_sps_vui(&pk[0].data).unwrap().colour, Some((1, 1, 1)));
     }
 
     #[test]

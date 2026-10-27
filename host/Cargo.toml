@@ -35,11 +35,10 @@ num_cpus = "1"
 xcap = "0.9.8"
 
 # Hardware/software H.264 encoding through the system ffmpeg (VAAPI/NVENC/QSV/AMF/...),
-# x264, and SIMD RGB->YUV conversion for the CPU paths. Optional (feature `encoders`,
+# x264 (direct on Linux, ffmpeg's libx264 on Windows), and SIMD RGB->YUV conversion for the CPU paths. Optional (feature `encoders`,
 # on by default) so `cargo check --target x86_64-pc-windows-msvc --no-default-features`
 # works without the native ffmpeg/x264 libraries.
 ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "filter"], optional = true }
-x264-sys = { version = "0.2", optional = true }
 yuvutils-rs = { version = "0.8", optional = true }
 
 zbus = "5"
@@ -62,6 +61,10 @@ default = ["encoders"]
 # H.264 encoder backends (ffmpeg, x264). Turn off only to type-check other
 # platforms where the native libraries are not installed.
 encoders = ["dep:ffmpeg-next", "dep:x264-sys", "dep:yuvutils-rs"]
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+# Software H.264 fallback. Windows has no pkg-config x264; it uses ffmpeg's libx264 instead.
+x264-sys = { version = "0.2", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Native Wayland screen capture, using lamco-pipewire.

@@ -8,7 +8,7 @@ pub mod convert;
 #[cfg(feature = "encoders")]
 pub mod ffmpeg;
 pub mod stream;
-#[cfg(feature = "encoders")]
+#[cfg(all(feature = "encoders", not(target_os = "windows")))]
 pub mod x264;
 #[cfg(all(feature = "encoders", target_os = "linux"))]
 pub mod zerocopy;
@@ -103,7 +103,11 @@ pub(crate) fn open_backend(
     #[cfg(feature = "encoders")]
     return Ok(match b {
         Backend::Ffmpeg(name) => Box::new(ffmpeg::FfmpegEncoder::try_new(name, w, h, fps, kbps, qp)?),
+        #[cfg(not(target_os = "windows"))]
         Backend::X264 => Box::new(x264::X264Encoder::try_new_with(w, h, fps, kbps, qp)?),
+        // No pkg-config x264 on Windows; the same encoder through ffmpeg.
+        #[cfg(target_os = "windows")]
+        Backend::X264 => Box::new(ffmpeg::FfmpegEncoder::try_new(ffmpeg::LIBX264, w, h, fps, kbps, qp)?),
     });
     #[cfg(not(feature = "encoders"))]
     {

@@ -21,6 +21,14 @@ pub const MATRIX_COEFFICIENTS: i32 = 1;
 /// MediaCodec; full range is signalled inconsistently across Android vendors.
 pub const FULL_RANGE: bool = false;
 
+/// All of the above as the VUI states it, for encoders that leave it out.
+pub const VIDEO_SIGNAL: super::stream::VideoSignal = super::stream::VideoSignal {
+    full_range: FULL_RANGE,
+    primaries: COLOUR_PRIMARIES as u8,
+    transfer: TRANSFER_CHARACTERISTICS as u8,
+    matrix: MATRIX_COEFFICIENTS as u8,
+};
+
 const MATRIX: YuvStandardMatrix = YuvStandardMatrix::Bt709;
 const RANGE: YuvRange = if FULL_RANGE { YuvRange::Full } else { YuvRange::Limited };
 

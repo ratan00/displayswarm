@@ -113,10 +113,10 @@ fn default_encoder_emits_config_key_delta_in_order() {
 #[test]
 fn every_working_backend_signals_bt709_limited_high() {
     let (w, h) = (640usize, 384usize);
-    let fr = frames(w, h, 1);
+    let fr = frames(w, h, WARMUP_FRAMES);
     for b in backend_chain() {
         let Ok(mut enc) = open_backend(b, w as u32, h as u32, 60, 4000, None) else { continue };
-        let pk = enc.encode(&fr[0]).unwrap();
+        let pk = first_output(enc.as_mut(), &fr);
         let info = stream::parse_sps_vui(&pk[0].data).expect("parsable SPS");
         assert_eq!((info.width, info.height), (640, 384), "{}", enc.backend_name());
         assert_eq!(info.profile_idc, 100, "{} should be High profile", enc.backend_name());
@@ -128,17 +128,32 @@ fn every_working_backend_signals_bt709_limited_high() {
 #[test]
 fn set_bitrate_and_keyframe_request_work_on_every_backend() {
     let (w, h) = (640usize, 384usize);
-    let fr = frames(w, h, 4);
+    let fr = frames(w, h, WARMUP_FRAMES);
     for b in backend_chain() {
         let Ok(mut enc) = open_backend(b, w as u32, h as u32, 60, 4000, None) else { continue };
-        enc.encode(&fr[0]).unwrap();
-        enc.encode(&fr[1]).unwrap();
+        first_output(enc.as_mut(), &fr);
         enc.set_bitrate(2000);
-        let pk = enc.encode(&fr[2]).unwrap();
-        assert!(!pk.is_empty(), "{}", enc.backend_name());
-        let pk = enc.encode(&fr[3]).unwrap();
-        assert!(!pk.is_empty(), "{}", enc.backend_name());
+        first_output(enc.as_mut(), &fr);
+        enc.request_keyframe();
+        let pk = first_output(enc.as_mut(), &fr);
+        assert!(pk.iter().any(|p| p.frame_type == FRAME_TYPE_KEY), "{}: no keyframe after a request", enc.backend_name());
     }
+}
+
+/// Media Foundation's asynchronous MFTs return nothing for their first couple
+/// of frames after (re)opening (measured: 2 on Intel UHD 620), then keep up
+/// one-for-one. Synchronous backends answer the first frame.
+const WARMUP_FRAMES: usize = 8;
+
+/// Feeds `fr` until the encoder emits something; fails if it never does.
+fn first_output(enc: &mut dyn VideoEncoder, fr: &[Frame]) -> Vec<EncodedPacket> {
+    for f in fr {
+        let pk = enc.encode(f).unwrap();
+        if !pk.is_empty() {
+            return pk;
+        }
+    }
+    panic!("{}: no output after {} frames", enc.backend_name(), fr.len());
 }
 
 /// Isolates the CPU colour-conversion cost from the encoder's own time.

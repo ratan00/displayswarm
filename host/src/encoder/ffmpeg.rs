@@ -28,6 +28,12 @@ pub const HW_BACKENDS: &[&str] = &["h264_vaapi", "h264_qsv", "h264_nvenc", "h264
 #[cfg(target_os = "windows")]
 pub const HW_BACKENDS: &[&str] = &["h264_nvenc", "h264_qsv", "h264_amf", "h264_mf"];
 
+/// Software x264 through libavcodec: the last fallback on Windows, where the
+/// direct `x264` backend has no library to link (see `encoder::open_backend`).
+/// Same settings as `x264.rs`: `superfast`/`zerolatency`, no scenecut IDRs,
+/// SPS/PPS in front of every IDR.
+pub const LIBX264: &str = "libx264";
+
 const VAAPI_COMPRESSION_LEVEL: i32 = 4;
 
 pub(super) fn av_err(code: c_int) -> String {
@@ -102,6 +108,12 @@ fn private_options(cfg: &Config) -> Vec<(&'static str, String)> {
             ("scenario", "display_remoting"),
             ("hw_encoding", "1"),
         ],
+        LIBX264 => vec![
+            ("preset", "superfast"),
+            ("tune", "zerolatency"),
+            ("profile", "high"),
+            ("x264-params", "scenecut=0:repeat-headers=1:annexb=1:aud=0"),
+        ],
         _ => vec![],
     }
     .into_iter()
@@ -122,6 +134,8 @@ fn private_options(cfg: &Config) -> Vec<(&'static str, String)> {
                 o.push(("qp_i", qp.clone()));
                 o.push(("qp_p", qp));
             }
+            // CRF like x264.rs; the bitrate cap is set on the context in `Inner::open`.
+            LIBX264 => o.push(("crf", qp)),
             // QSV takes global_quality with the qscale flag (see `Inner::open`);
             // Media Foundation keeps CBR.
             _ => {}
@@ -196,6 +210,12 @@ impl Inner {
                         c.flags |= AV_CODEC_FLAG_QSCALE as c_int;
                         c.global_quality = (qp as i32) * FF_QP2LAMBDA as i32;
                     }
+                    if cfg.codec == LIBX264 {
+                        // Capped CRF, as x264.rs: a burst of motion cannot outrun USB 2.
+                        let cap = super::WIRED_MAX_KBPS as i64 * 1000;
+                        c.rc_max_rate = cap;
+                        c.rc_buffer_size = ((cap * VBV_FRAMES as i64) / fps as i64).max(1) as i32;
+                    }
                 }
                 _ => {
                     c.bit_rate = bitrate;
@@ -213,7 +233,9 @@ impl Inner {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(VAAPI_COMPRESSION_LEVEL);
             }
-            c.thread_count = 1; // hardware encoders do not benefit from frame threads
+            // Hardware encoders do not benefit from frame threads; x264 uses sliced
+            // threads under `zerolatency`, one per physical core as in x264.rs.
+            c.thread_count = if cfg.codec == LIBX264 { num_cpus::get_physical().max(1) as i32 } else { 1 };
             // VUI colour description; must match convert.rs.
             c.color_primaries = AVColorPrimaries::AVCOL_PRI_BT709;
             c.color_trc = AVColorTransferCharacteristic::AVCOL_TRC_BT709;
@@ -449,7 +471,9 @@ impl FfmpegEncoder {
                             "{} ready: {}x{} @ {} fps, {}, device {:?}, low_power {}",
                             codec, width, height, fps, rate, device, low_power
                         );
-                        let mut packetizer = Packetizer::default();
+                        // h264_mf ignores the context's colour fields; the
+                        // packetizer writes them into its SPS (others pass as is).
+                        let mut packetizer = Packetizer::with_signal(convert::VIDEO_SIGNAL);
                         packetizer.set_config(&inner.extradata());
                         #[cfg(target_os = "linux")]
                         if codec == "h264_vaapi" {
