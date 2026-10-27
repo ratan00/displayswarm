@@ -193,36 +193,119 @@ pub fn check_connected_devices() -> Result<Vec<UsbDeviceInfo>, nusb::Error> {
 /// Target for vendor control requests.
 ///
 /// nusb's device-level control transfers are not available on Windows (WinUSB
-/// only issues them through a claimed interface), so there we claim the first
-/// interface and send them through it. Elsewhere the device handle is used
+/// only issues them through a claimed interface), so there we claim one of the
+/// phone's interfaces and send them through it. Which one matters: MTP, modem
+/// and friends are bound to their own drivers and cannot be claimed; only the
+/// ADB interface is normally WinUSB. Elsewhere the device handle is used
 /// directly, which avoids claiming (and detaching the kernel driver from) an
 /// MTP/ADB interface just to switch modes.
 struct ControlPort {
     #[cfg(not(target_os = "windows"))]
     device: Device,
     #[cfg(target_os = "windows")]
-    interface: Interface,
+    inner: WinControl,
+}
+
+#[cfg(target_os = "windows")]
+enum WinControl {
+    /// Claimed through nusb (WinUSB or USBCCGP parent).
+    Nusb(Interface),
+    /// Opened directly: the parent has a vendor bus driver nusb cannot use.
+    Direct(super::winusb_control::WinUsbControl),
+}
+
+/// An interface as the control-port chooser sees it:
+/// `(number, class, subclass, protocol, claimable)`.
+type IfaceTuple = (u8, u8, u8, u8, bool);
+
+/// Order in which to try interfaces for sending the AOA requests: only the
+/// claimable ones, the ADB interface first (it is the one Windows binds to
+/// WinUSB), then other vendor-specific ones, then the rest by number.
+fn control_interface_order(ifaces: &[IfaceTuple]) -> Vec<u8> {
+    let mut v: Vec<(u8, u8)> = ifaces
+        .iter()
+        .filter(|t| t.4)
+        .map(|&(n, class, sub, proto, _)| {
+            let rank = if is_adb_interface(class, sub, proto) {
+                0
+            } else if class == 0xFF {
+                1
+            } else {
+                2
+            };
+            (rank, n)
+        })
+        .collect();
+    v.sort();
+    v.into_iter().map(|(_, n)| n).collect()
+}
+
+/// Whether a device looks like a phone we might switch (an ADB or MTP/PTP
+/// interface), so failures on webcams, hubs and keyboards stay quiet.
+fn looks_like_android(ifaces: &[IfaceTuple]) -> bool {
+    ifaces
+        .iter()
+        .any(|&(_, c, s, p, _)| is_adb_interface(c, s, p) || (c == 0x06 && s == 0x01 && p == 0x01))
+}
+
+/// True the first time `key` is seen.
+fn first_time(key: String) -> bool {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let seen = SEEN.get_or_init(Default::default);
+    seen.lock().unwrap_or_else(|e| e.into_inner()).insert(key)
+}
+
+/// Logs `msg` at INFO the first time `key` is seen, so a poll loop that fails
+/// the same way every tick says it once.
+fn info_once(key: String, msg: impl FnOnce() -> String) {
+    if first_time(key) {
+        info!("{}", msg());
+    }
+}
+
+fn iface_tuples(info: &DeviceInfo) -> Vec<IfaceTuple> {
+    // nusb on Windows can only claim interfaces of WinUSB or USBCCGP parents.
+    let claimable = !cfg!(target_os = "windows")
+        || matches!(info.driver().map(str::to_ascii_lowercase).as_deref(), Some("winusb" | "usbccgp"));
+    info.interfaces()
+        .map(|i| (i.interface_number(), i.class(), i.subclass(), i.protocol(), claimable))
+        .collect()
 }
 
 impl ControlPort {
     #[cfg(not(target_os = "windows"))]
-    async fn new(device: Device) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    async fn new(device: Device, _info: &DeviceInfo) -> Result<Self, String> {
         Ok(Self { device })
     }
 
     #[cfg(target_os = "windows")]
-    async fn new(device: Device) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let number = device
-            .active_configuration()?
-            .interfaces()
-            .next()
-            .map(|i| i.interface_number())
-            .ok_or("device has no interfaces")?;
-        let interface = device.claim_interface(number).await?;
-        Ok(Self { interface })
+    async fn new(device: Device, info: &DeviceInfo) -> Result<Self, String> {
+        let ifaces = iface_tuples(info);
+        let mut errors = Vec::new();
+        for n in control_interface_order(&ifaces) {
+            match device.claim_interface(n).await {
+                Ok(interface) => return Ok(Self { inner: WinControl::Nusb(interface) }),
+                Err(e) => errors.push(format!("interface {n}: {e}")),
+            }
+        }
+        match super::winusb_control::WinUsbControl::open_adb_interface(info.vendor_id(), info.product_id()) {
+            Ok(c) => Ok(Self { inner: WinControl::Direct(c) }),
+            Err(e) => {
+                errors.push(format!("ADB interface: {e}"));
+                Err(errors.join("; "))
+            }
+        }
     }
 
     async fn vendor_in(&self, request: u8, length: u16) -> Result<Vec<u8>, TransferError> {
+        #[cfg(target_os = "windows")]
+        if let WinControl::Direct(c) = &self.inner {
+            return c.vendor_in(request, length).map_err(|e| {
+                debug!("WinUSB control IN failed: {e}");
+                TransferError::Fault
+            });
+        }
         let req = ControlIn {
             control_type: ControlType::Vendor,
             recipient: Recipient::Device,
@@ -232,12 +315,22 @@ impl ControlPort {
             length,
         };
         #[cfg(target_os = "windows")]
-        return self.interface.control_in(req, USB_CONTROL_TIMEOUT).await;
+        return match &self.inner {
+            WinControl::Nusb(i) => i.control_in(req, USB_CONTROL_TIMEOUT).await,
+            WinControl::Direct(_) => unreachable!(),
+        };
         #[cfg(not(target_os = "windows"))]
         self.device.control_in(req, USB_CONTROL_TIMEOUT).await
     }
 
     async fn vendor_out(&self, request: u8, index: u16, data: &[u8]) -> Result<(), TransferError> {
+        #[cfg(target_os = "windows")]
+        if let WinControl::Direct(c) = &self.inner {
+            return c.vendor_out(request, index, data).map_err(|e| {
+                debug!("WinUSB control OUT failed: {e}");
+                TransferError::Fault
+            });
+        }
         let req = ControlOut {
             control_type: ControlType::Vendor,
             recipient: Recipient::Device,
@@ -247,7 +340,10 @@ impl ControlPort {
             data,
         };
         #[cfg(target_os = "windows")]
-        return self.interface.control_out(req, USB_CONTROL_TIMEOUT).await;
+        return match &self.inner {
+            WinControl::Nusb(i) => i.control_out(req, USB_CONTROL_TIMEOUT).await,
+            WinControl::Direct(_) => unreachable!(),
+        };
         #[cfg(not(target_os = "windows"))]
         self.device.control_out(req, USB_CONTROL_TIMEOUT).await
     }
@@ -329,24 +425,56 @@ async fn probe_and_switch_devices(devices: &[DeviceInfo], config: &AoaConfig) ->
         if info.class() == 0x09 {
             continue;
         }
-        let Ok(device) = info.open().await else {
-            continue;
+        let ifaces = iface_tuples(info);
+        // Failures are only worth a line for phones, and only once per device
+        // (this runs every poll).
+        let phone = looks_like_android(&ifaces);
+        let name = info.product_string().unwrap_or("Android device").to_string();
+        let ids = format!("{:04x}:{:04x}", info.vendor_id(), info.product_id());
+        let say = |what: &str, why: String| {
+            if phone {
+                let key = format!("{}:{ids}:{what}", format_bus_path(info.bus_id(), info.port_chain()));
+                info_once(key, || format!("USB: cannot switch {name} ({ids}) to accessory mode: {why}"));
+            }
         };
-        let Ok(port) = ControlPort::new(device).await else {
-            continue;
+        let device = match info.open().await {
+            Ok(d) => d,
+            Err(e) => {
+                say("open", format!("cannot open the device ({e})"));
+                continue;
+            }
         };
-        if let Ok(version) = get_aoa_protocol(&port).await {
-            if version >= 1 {
+        let port = match ControlPort::new(device, info).await {
+            Ok(p) => p,
+            Err(e) => {
+                let hint = if cfg!(target_os = "windows") {
+                    if ifaces.iter().any(|&(_, c, s, p, _)| is_adb_interface(c, s, p)) {
+                        "the adb server probably holds the ADB interface: run `adb kill-server` (or use Wi-Fi)"
+                    } else {
+                        "no WinUSB interface is available: turn on USB debugging so the ADB interface appears (or use Wi-Fi)"
+                    }
+                } else {
+                    "check the udev rule / permissions (or use Wi-Fi)"
+                };
+                say("claim", format!("{hint} [{e}]"));
+                continue;
+            }
+        };
+        match get_aoa_protocol(&port).await {
+            Ok(version) if version >= 1 => {
                 info!(
                     "Found compatible Android device (VID: {:04x}, PID: {:04x}) supporting AOA v{}",
                     info.vendor_id(),
                     info.product_id(),
                     version
                 );
-                if perform_aoa_handshake(&port, config).await.is_ok() {
-                    return true;
+                match perform_aoa_handshake(&port, config).await {
+                    Ok(_) => return true,
+                    Err(e) => say("handshake", format!("handshake failed ({e})")),
                 }
             }
+            Ok(_) => say("protocol", "the device does not support AOA".to_string()),
+            Err(e) => say("protocol", format!("the AOA protocol query failed ({e})")),
         }
     }
     false
@@ -1081,7 +1209,24 @@ async fn open_accessory_stream(
 
     // On Linux this also detaches any kernel driver bound to the interface;
     // elsewhere it is a plain claim.
-    let interface = device.detach_and_claim_interface(iface).await?;
+    let interface = match device.detach_and_claim_interface(iface).await {
+        Ok(i) => i,
+        Err(e) => {
+            if cfg!(target_os = "windows") {
+                // Windows has no driver for the accessory interface until ours is installed.
+                let path = format_bus_path(info.bus_id(), info.port_chain());
+                info_once(format!("{path}:driver"), || {
+                    format!(
+                        "USB: the phone is in accessory mode ({:04x}:{:04x}) but Windows cannot open it ({e}); \\
+                         install the USB driver once with `displayswarm-hostd --install-usb-driver` (asks for administrator rights)",
+                        info.vendor_id(),
+                        info.product_id()
+                    )
+                });
+            }
+            return Err(e.into());
+        }
+    };
     info!("Successfully claimed AOA interface {}", iface);
 
     let identity = identity_of(info);
@@ -1186,6 +1331,45 @@ mod tests {
         assert_eq!(pick_bulk_pair(no_out.into_iter()), None);
         let iso = [(0x81, Isochronous), (0x02, Bulk)];
         assert_eq!(pick_bulk_pair(iso.into_iter()), None);
+    }
+
+    #[test]
+    fn test_control_interface_order() {
+        // The Samsung layout: MTP(0), modem(1), ADB(3). Only ADB is claimable.
+        let samsung = [
+            (0, 0x06, 0x01, 0x01, false),
+            (1, 0x02, 0x02, 0x01, false),
+            (3, 0xFF, 0x42, 0x01, true),
+        ];
+        assert_eq!(control_interface_order(&samsung), vec![3]);
+        // Everything claimable: ADB first, then other vendor classes, then the rest.
+        let all = [
+            (0, 0x06, 0x01, 0x01, true),
+            (1, 0xFF, 0x00, 0x00, true),
+            (2, 0xFF, 0x42, 0x01, true),
+            (4, 0x08, 0x06, 0x50, true),
+        ];
+        assert_eq!(control_interface_order(&all), vec![2, 1, 0, 4]);
+        // Nothing claimable (vendor bus driver): nothing to try via nusb.
+        let none = [(0, 0xFF, 0x42, 0x01, false)];
+        assert!(control_interface_order(&none).is_empty());
+        assert!(control_interface_order(&[]).is_empty());
+    }
+
+    #[test]
+    fn test_looks_like_android() {
+        assert!(looks_like_android(&[(0, 0x06, 0x01, 0x01, true)]));
+        assert!(looks_like_android(&[(0, 0x0E, 0x01, 0x00, true), (3, 0xFF, 0x42, 0x01, false)]));
+        // A webcam and a hub-ish vendor device are not phones.
+        assert!(!looks_like_android(&[(0, 0x0E, 0x01, 0x00, true), (2, 0x01, 0x01, 0x00, true)]));
+        assert!(!looks_like_android(&[(0, 0xFF, 0x00, 0x00, true)]));
+    }
+
+    #[test]
+    fn test_first_time_reports_each_key_once() {
+        assert!(first_time("test-once-key".into()));
+        assert!(!first_time("test-once-key".into()));
+        assert!(first_time("test-other-key".into()));
     }
 
     #[test]

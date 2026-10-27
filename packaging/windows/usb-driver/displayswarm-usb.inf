@@ -1,0 +1,51 @@
+; DisplaySwarm: bind Windows' inbox WinUSB driver to a phone's Android Open
+; Accessory interface, so the app can talk to it over USB.
+;
+; No binaries: this only points the accessory interface at winusb.sys (via
+; winusb.inf). The catalog (displayswarm-usb.cat) is generated and signed
+; locally by install.ps1 and is not part of this source tree.
+;
+;   18D1:2D00  accessory                 (whole device)
+;   18D1:2D01  accessory + adb           (interface 0 only; adb, interface 1,
+;                                          keeps its own driver)
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = USBDevice
+ClassGUID   = {88BAE032-5A81-49f0-BC3D-A4FF138216D6}
+Provider    = %Provider%
+CatalogFile = displayswarm-usb.cat
+DriverVer   = 06/01/2026,1.0.0.0
+
+[Manufacturer]
+%Provider% = Models, NTamd64, NTx86, NTarm64
+
+[Models.NTamd64]
+%Accessory%    = USB_Install, USB\VID_18D1&PID_2D00
+%Accessory%    = USB_Install, USB\VID_18D1&PID_2D01&MI_00
+
+[Models.NTx86]
+%Accessory%    = USB_Install, USB\VID_18D1&PID_2D00
+%Accessory%    = USB_Install, USB\VID_18D1&PID_2D01&MI_00
+
+[Models.NTarm64]
+%Accessory%    = USB_Install, USB\VID_18D1&PID_2D00
+%Accessory%    = USB_Install, USB\VID_18D1&PID_2D01&MI_00
+
+[USB_Install]
+Include = winusb.inf
+Needs   = WINUSB.NT
+
+[USB_Install.Services]
+Include = winusb.inf
+Needs   = WINUSB.NT.Services
+
+[USB_Install.HW]
+AddReg = Dev_AddReg
+
+[Dev_AddReg]
+HKR,,DeviceInterfaceGUIDs,0x10000,"{4D9E6A0B-3C1F-4E5B-8A7D-6F2B1C0D9E31}"
+
+[Strings]
+Provider  = "DisplaySwarm"
+Accessory = "DisplaySwarm Android Accessory (WinUSB)"

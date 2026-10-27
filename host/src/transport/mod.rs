@@ -5,6 +5,9 @@ pub mod firewall;
 pub mod mdns;
 pub mod pairing;
 pub mod tls;
+pub mod usb_driver;
+#[cfg(windows)]
+mod winusb_control;
 
 use std::io;
 use std::path::PathBuf;

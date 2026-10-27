@@ -5,7 +5,9 @@
 //! Normally started by the systemd user unit or on demand by the UI.
 //!
 //! Options: `--socket PATH`, `--no-tray`, `--no-server` (do not start the
-//! server until asked), `--help`.
+//! server until asked), `--install-usb-driver` / `--uninstall-usb-driver`
+//! (Windows: the WinUSB driver for the phone's accessory mode, elevated),
+//! `--help`.
 
 use displayswarm_host::daemon::{self, logging, DaemonOptions};
 use displayswarm_host::ipc::{default_socket_path, transport_at};
@@ -16,6 +18,9 @@ fn main() {
     let mut start_server = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
+        if let Some(code) = displayswarm_host::transport::usb_driver::handle_flag(&a) {
+            std::process::exit(code);
+        }
         match a.as_str() {
             "--socket" => match args.next() {
                 Some(p) => socket = p.into(),
@@ -24,7 +29,7 @@ fn main() {
             "--no-tray" => tray = false,
             "--no-server" => start_server = Some(false),
             "-h" | "--help" => {
-                return println!("usage: displayswarm-hostd [--socket PATH] [--no-tray] [--no-server]");
+                return println!("usage: displayswarm-hostd [--socket PATH] [--no-tray] [--no-server] [--install-usb-driver | --uninstall-usb-driver]");
             }
             other => return eprintln!("unknown argument {other:?} (try --help)"),
         }
