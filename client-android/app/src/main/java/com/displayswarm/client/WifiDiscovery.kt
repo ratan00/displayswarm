@@ -88,6 +88,16 @@ class KnownHostStore(private val load: () -> String?, private val save: (String)
     }
 }
 
+/**
+ * The saved host to pin for a connection to [host]:[port]. With a discovered [idPrefix] only the
+ * certificate decides: an unknown id is an unpaired host, even at the address of a known one
+ * (dual-boot: two OS installs share an IP, each has its own certificate). A typed-in address
+ * has no id, so it falls back to the address, the most recently used pairing winning.
+ */
+fun selectKnownHost(known: List<KnownHost>, host: String, port: Int, idPrefix: String): KnownHost? =
+    if (idPrefix.isNotEmpty()) known.firstOrNull { it.fingerprintHex.startsWith(idPrefix) }
+    else known.filter { it.host == host && it.port == port }.maxByOrNull { it.lastSeen }
+
 /** The discovered host that should be connected to automatically, if any. */
 fun pickAutoConnect(found: List<HostInfo>, known: List<KnownHost>, enabled: Boolean): Pair<HostInfo, KnownHost>? {
     if (!enabled) return null
@@ -250,6 +260,19 @@ class WifiHosts(context: Context) {
         _known.value = store.all()
     }
 
+    /** Fingerprint pinned by the most recent [securityFor], so a "certificate changed" failure can be recovered from. */
+    @Volatile
+    private var lastPinnedHex: String? = null
+
+    /** Forgets the host the last connection tried to pin; true if there was one. */
+    fun forgetLastPinned(): Boolean {
+        val hex = lastPinnedHex ?: return false
+        lastPinnedHex = null
+        store.forget(hex)
+        _known.value = store.all()
+        return true
+    }
+
     fun forget(k: KnownHost) {
         store.forget(k.fingerprintHex)
         _known.value = store.all()
@@ -267,10 +290,10 @@ class WifiHosts(context: Context) {
         idPrefix: String = "",
         pinProvider: suspend (String) -> String?
     ): NetSecurity {
-        // By address first; by certificate id when the host's address changed (DHCP, hotspot),
-        // otherwise a known host would ask for a PIN nobody can see.
-        val k = _known.value.firstOrNull { it.host == host && it.port == port }
-            ?: idPrefix.takeIf { it.isNotEmpty() }?.let { id -> _known.value.firstOrNull { it.fingerprintHex.startsWith(id) } }
+        // By certificate id when discovery gave one (the address may be shared or changed);
+        // by address only for a typed-in host.
+        val k = selectKnownHost(_known.value, host, port, idPrefix)
+        lastPinnedHex = k?.fingerprintHex
         return NetSecurity(
             deviceId = DeviceIdentity.id(app),
             deviceName = android.os.Build.MODEL ?: "Android",

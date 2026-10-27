@@ -110,6 +110,8 @@ class ClientUiState(val settings: AppSettings) {
     var role by mutableStateOf(RoleState())
     var usbStatus by mutableStateOf("No USB cable detected")
     var hosts by mutableStateOf<List<HostEntry>>(emptyList())
+    /** PCs this phone is paired with (for the Forget action). */
+    var knownHosts by mutableStateOf<List<KnownHost>>(emptyList())
     var manualHost by mutableStateOf(settings.lastHost.takeIf { it.isNotEmpty() && !it.contains(':') } ?: "127.0.0.1")
 
     var toolbarOpen by mutableStateOf(false)
@@ -159,6 +161,9 @@ class ClientUiState(val settings: AppSettings) {
 interface ClientActions {
     fun connectHost(host: HostEntry)
     fun connectUsb()
+    fun forgetHost(host: KnownHost)
+    /** Forgets the PC whose pinned certificate the last connection rejected, so it can be paired again. */
+    fun forgetLastPinnedHost()
     fun disconnect()
     fun requestRole(role: Int)
     fun dismissChooser()
@@ -198,6 +203,9 @@ fun ClientUi(state: ClientUiState, actions: ClientActions) {
                     usbStatus = state.usbStatus,
                     status = state.status,
                     hosts = state.hosts,
+                    knownHosts = state.knownHosts,
+                    onForget = actions::forgetHost,
+                    onForgetLast = actions::forgetLastPinnedHost,
                     manualHost = state.manualHost,
                     onManualHostChange = { state.manualHost = it },
                     onConnect = actions::connectHost,
@@ -231,12 +239,31 @@ fun ConnectScreen(
     usbStatus: String,
     status: String,
     hosts: List<HostEntry>,
+    knownHosts: List<KnownHost>,
+    onForget: (KnownHost) -> Unit,
+    onForgetLast: () -> Unit,
     manualHost: String,
     onManualHostChange: (String) -> Unit,
     onConnect: (HostEntry) -> Unit,
     onConnectUsb: () -> Unit,
     onSettings: () -> Unit
 ) {
+    var pendingForget by remember { mutableStateOf<KnownHost?>(null) }
+    var confirmForgetLast by remember { mutableStateOf(false) }
+    pendingForget?.let { k ->
+        ConfirmForgetDialog(
+            "Forget ${k.name}? You will need its PIN to pair with it again.",
+            onConfirm = { pendingForget = null; onForget(k) },
+            onDismiss = { pendingForget = null }
+        )
+    }
+    if (confirmForgetLast) {
+        ConfirmForgetDialog(
+            "Forget the PC this phone has saved for this address? You will need its PIN to pair again.",
+            onConfirm = { confirmForgetLast = false; onForgetLast() },
+            onDismiss = { confirmForgetLast = false }
+        )
+    }
     Surface(Modifier.fillMaxSize(), color = Color(0xFF11111B)) {
         // The padding sits inside each scrolling column: padding outside a scroll container
         // clips the content 24dp short of the screen edge, unlike other apps.
@@ -247,6 +274,10 @@ fun ConnectScreen(
             ) {
                 Text("DisplaySwarm", style = MaterialTheme.typography.headlineMedium)
                 Text(status, style = MaterialTheme.typography.bodyMedium, color = Color(0xFFA6ADC8))
+                // A reinstalled or different OS on the same PC has a new certificate: offer the way out.
+                if (status.contains("certificate changed")) {
+                    Button(onClick = { confirmForgetLast = true }) { Text("Forget this PC and pair again") }
+                }
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text("USB", style = MaterialTheme.typography.titleMedium)
@@ -264,6 +295,22 @@ fun ConnectScreen(
                             singleLine = true
                         )
                         Button(onClick = { onConnect(HostEntry(manualHost, manualHost.trim(), 9999, "manual")) }) { Text("Connect") }
+                    }
+                }
+                if (knownHosts.isNotEmpty()) {
+                    Card(Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("Saved PCs", style = MaterialTheme.typography.titleMedium)
+                            knownHosts.forEach { k ->
+                                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(k.name, style = MaterialTheme.typography.titleSmall)
+                                        Text("${k.host}:${k.port}", fontSize = 12.sp, color = Color(0xFFA6ADC8))
+                                    }
+                                    TextButton(onClick = { pendingForget = k }) { Text("Forget") }
+                                }
+                            }
+                        }
                     }
                 }
                 TextButton(onClick = onSettings) { Text("Settings") }
@@ -286,6 +333,17 @@ fun ConnectScreen(
             }
         }
     }
+}
+
+@Composable
+private fun ConfirmForgetDialog(message: String, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Forget this PC?") },
+        text = { Text(message) },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("Forget") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
 }
 
 // ---- Role chooser -----------------------------------------------------------

@@ -140,4 +140,45 @@ class PairingTest {
         assertNull(pickAutoConnect(listOf(h), listOf(known.copy(fingerprintHex = "cd".repeat(32))), true))
         assertFalse(known.matches(h.copy(idPrefix = "")))
     }
+
+    // Dual boot: Linux and Windows on one laptop share an IP but not a certificate.
+    private val linux = KnownHost("laptop", "10.0.0.7", 9999, "ab".repeat(32), "01", lastSeen = 1)
+    private val windows = KnownHost("laptop", "10.0.0.7", 9999, "cd".repeat(32), "02", lastSeen = 2)
+
+    private fun hostInfo(id: String) = HostInfo("laptop", "10.0.0.7", 9999, id, 2, true)
+
+    @Test
+    fun selectKnownHostPicksByIdWhenTwoHostsShareAnAddress() {
+        val known = listOf(linux, windows)
+        assertEquals(linux, selectKnownHost(known, "10.0.0.7", 9999, "abababababababab"))
+        assertEquals(windows, selectKnownHost(known, "10.0.0.7", 9999, "cdcdcdcdcdcdcdcd"))
+    }
+
+    @Test
+    fun selectKnownHostTreatsUnknownIdAtKnownAddressAsUnpaired() {
+        assertNull(selectKnownHost(listOf(linux), "10.0.0.7", 9999, "cdcdcdcdcdcdcdcd"))
+    }
+
+    @Test
+    fun selectKnownHostWithoutIdFallsBackToAddress() {
+        assertEquals(linux, selectKnownHost(listOf(linux), "10.0.0.7", 9999, ""))
+        assertEquals(windows, selectKnownHost(listOf(linux, windows), "10.0.0.7", 9999, ""))
+        assertNull(selectKnownHost(listOf(linux), "10.0.0.8", 9999, ""))
+        assertNull(selectKnownHost(listOf(linux), "10.0.0.7", 1234, ""))
+    }
+
+    @Test
+    fun selectKnownHostFindsHostWhoseAddressChanged() {
+        assertEquals(linux, selectKnownHost(listOf(linux), "10.0.0.99", 9999, "abababababababab"))
+    }
+
+    @Test
+    fun pickAutoConnectMatchesByIdForSameAddressHosts() {
+        val known = listOf(linux, windows)
+        val w = hostInfo("cdcdcdcdcdcdcdcd")
+        val l = hostInfo("abababababababab")
+        assertEquals(w to windows, pickAutoConnect(listOf(w), known, true))
+        assertEquals(l to linux, pickAutoConnect(listOf(l), known, true))
+        assertNull(pickAutoConnect(listOf(hostInfo("efefefefefefefef")), known, true))
+    }
 }

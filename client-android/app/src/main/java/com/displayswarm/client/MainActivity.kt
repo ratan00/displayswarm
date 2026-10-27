@@ -99,6 +99,9 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback, ClientActions 
                 setWifiHosts(found.map { HostEntry(it.name, it.host, it.port, idPrefix = it.idPrefix) })
             }
         }
+        lifecycleScope.launch {
+            wifiHosts.known.collect { k -> ui.knownHosts = k }
+        }
         // A display should light up when it is plugged in, like a real monitor,
         // even if the phone is locked. The activity is shown above the keyguard
         // WITHOUT dismissing it: the phone itself stays locked, only the host's
@@ -313,6 +316,14 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback, ClientActions 
         if (hostConnector?.invoke(host) == true) return
         settings.lastHost = host.address
         connectTcp(host)
+    }
+
+    override fun forgetHost(host: KnownHost) {
+        wifiHosts.forget(host)
+    }
+
+    override fun forgetLastPinnedHost() {
+        if (wifiHosts.forgetLastPinned()) ui.status = "Forgot the saved PC. Connect again and enter the PIN to pair."
     }
 
     override fun connectUsb() {
