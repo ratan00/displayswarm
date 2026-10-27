@@ -47,6 +47,18 @@ export struct DiagRow {
 
 // Colours derived from the system palette, so the window follows the desktop's
 // light or dark theme together with the standard widgets inside it.
+// Wording and actions that differ by operating system; filled in from Rust at
+// startup so the same window does not talk about eDP-1 on Windows.
+export global Platform {
+    in-out property <string> monitor-hint: "e.g. eDP-1; empty asks each time";
+    in-out property <string> scale-hint: "Sets the monitor's scale from the device's density. Applies on the next connection.";
+    // The full explanation for every unavailable role, shown once under the role cards.
+    in-out property <string> role-notice: "";
+    // What the notice's button copies; empty hides the button.
+    in-out property <string> role-notice-copy: "";
+    callback copy-text(string);
+}
+
 global Theme {
     out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
     out property <brush> window: Palette.background;
@@ -510,9 +522,15 @@ component DeviceDetail inherits VerticalLayout {
                 active: root.dev.role-index == 5; clicked => { root.set-role(5); }
             }
         }
+        if Platform.role-notice != "": Callout {
+            text: Platform.role-notice;
+            tint: Theme.accent;
+            action: Platform.role-notice-copy != "" ? "Copy install command" : "";
+            activated => { Platform.copy-text(Platform.role-notice-copy); }
+        }
         if root.dev.show-target: SettingRow {
             title: "Laptop monitor";
-            subtitle: "e.g. eDP-1; empty asks each time";
+            subtitle: Platform.monitor-hint;
             LineEdit {
                 width: 180px;
                 placeholder-text: "Ask";
@@ -590,7 +608,7 @@ component DeviceDetail inherits VerticalLayout {
         }
         ToggleRow {
             title: "Scale the screen to the device";
-            subtitle: "Sets the monitor's scale from the device's density (KDE, GNOME). Applies on the next connection.";
+            subtitle: Platform.scale-hint;
             checked: root.dev.auto-scale;
             toggled(v) => { root.toggle-setting(9, v); }
         }

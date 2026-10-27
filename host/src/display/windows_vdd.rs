@@ -19,7 +19,7 @@
 //! * Control pipe `\\.\pipe\MTTVirtualDisplayPipe`: message mode, one UTF-16LE
 //!   command per connection, the driver answers (UTF-8, or log lines) and
 //!   disconnects. `SETDISPLAYCOUNT n` rewrites `<count>` and re-initialises the
-//!   adapter; `PING` answers `PONG`. `RELOAD_DRIVER` is **never sent**: it
+//!   adapter; `PING` is documented to answer `PONG` (the 25.7.23 package did not answer it). `RELOAD_DRIVER` is **never sent**: it
 //!   crashes the driver (upstream issue #351). `SETDISPLAYCOUNT` runs the same
 //!   reload function, so it may restart the driver host too; the other
 //!   project's control app treats it as a 2-8 s operation and spaces
@@ -60,13 +60,20 @@ pub const SETTINGS_FILE: &str = "vdd_settings.xml";
 /// The user's own settings, kept next to the file while DisplaySwarm has changed it.
 pub const BACKUP_SUFFIX: &str = ".displayswarm-backup";
 
-/// Driver builds DisplaySwarm was written against, by the `DriverDate` Windows
-/// records at install. Source-reviewed, **not tested on a machine**: release
-/// 25.7.23 and the signed package the project's control app ships (INF
-/// `DriverVer = 08/14/2025,22.50.22.79`). `DISPLAYSWARM_VDD_ANY_VERSION=1` skips
-/// the check.
-pub const SUPPORTED_FROM: (u16, u8, u8) = (2025, 7, 1);
-pub const SUPPORTED_UNTIL: (u16, u8, u8) = (2025, 12, 31);
+/// The oldest driver build DisplaySwarm supports, by the `DriverDate` Windows
+/// records at install. The winget / GitHub release 25.7.23 package carries INF
+/// `DriverVer = 12/24/2024,11.30.4.434` (checked on a machine with it
+/// installed), so the release number and the INF date do not line up: the
+/// minimum is that INF date. There is no upper bound: the driver's settings
+/// file and `SETDISPLAYCOUNT` pipe command are its stable interface, and every
+/// call is checked (pipe present, monitor appears), so a newer driver that
+/// changes them fails with a specific message instead of being refused up
+/// front. Builds after [`TESTED_UP_TO`] are accepted with a log warning.
+/// (`PING` got no answer from the 25.7.23 package, so it is not used as a
+/// liveness probe.) `DISPLAYSWARM_VDD_ANY_VERSION=1` skips the check.
+pub const SUPPORTED_FROM: (u16, u8, u8) = (2024, 12, 24);
+/// The newest build date whose source was reviewed against this module.
+pub const TESTED_UP_TO: (u16, u8, u8) = (2025, 12, 31);
 pub const ANY_VERSION_ENV: &str = "DISPLAYSWARM_VDD_ANY_VERSION";
 
 /// Spacing between reload-triggering commands (driver stability).
@@ -272,15 +279,24 @@ pub fn check_driver(driver: Option<&DriverInfo>, allow_any_version: bool) -> Ava
     if allow_any_version {
         return Availability::Yes;
     }
-    let range = format!("{} to {}", ymd(SUPPORTED_FROM), ymd(SUPPORTED_UNTIL));
     match parse_driver_date(&d.date) {
-        Some(date) if date >= SUPPORTED_FROM && date <= SUPPORTED_UNTIL => Availability::Yes,
-        Some(date) => Availability::No(format!(
-            "Virtual Display Driver {} (built {}) is {} than the builds DisplaySwarm supports ({range}). Install release 25.7.23, or set {ANY_VERSION_ENV}=1 to try this one anyway.",
+        Some(date) if date < SUPPORTED_FROM => Availability::No(format!(
+            "Virtual Display Driver {} (built {}) is older than DisplaySwarm supports (built {} or later). Update it: winget upgrade --id=VirtualDrivers.Virtual-Display-Driver, or install release 25.7.23 or newer from https://github.com/VirtualDrivers/Virtual-Display-Driver/releases. Or set {ANY_VERSION_ENV}=1 to try this one anyway.",
             d.version,
             ymd(date),
-            if date < SUPPORTED_FROM { "older" } else { "newer" }
+            ymd(SUPPORTED_FROM)
         )),
+        Some(date) => {
+            if date > TESTED_UP_TO {
+                log::warn!(
+                    "Virtual Display Driver {} (built {}) is newer than the builds DisplaySwarm was checked against (up to {}); trying it anyway",
+                    d.version,
+                    ymd(date),
+                    ymd(TESTED_UP_TO)
+                );
+            }
+            Availability::Yes
+        }
         None => Availability::No(format!(
             "The Virtual Display Driver's build date ({:?}) could not be read, so DisplaySwarm cannot tell whether it supports it. Set {ANY_VERSION_ENV}=1 to try anyway.",
             d.date
@@ -1236,7 +1252,7 @@ mod tests {
     }
 
     #[test]
-    fn driver_versions_are_pinned_by_build_date() {
+    fn driver_versions_have_a_minimum_build_date() {
         let d = |date: &str| DriverInfo {
             instance_id: "x".into(),
             version: "22.50.22.79".into(),
@@ -1248,10 +1264,13 @@ mod tests {
         assert_eq!(parse_driver_date("08/14/2025"), Some((2025, 8, 14)));
         assert_eq!(parse_driver_date("2025-08-14"), None);
         assert!(check_driver(Some(&d("8-14-2025")), false).is_yes());
-        let old = check_driver(Some(&d("12-24-2024")), false);
+        let old = check_driver(Some(&d("6-1-2024")), false);
         assert!(old.reason().unwrap().contains("older") && old.reason().unwrap().contains("25.7.23"), "{old:?}");
-        assert!(check_driver(Some(&d("3-1-2026")), false).reason().unwrap().contains("newer"));
-        assert!(check_driver(Some(&d("3-1-2026")), true).is_yes(), "the override skips the pin");
+        assert!(check_driver(Some(&d("12-24-2024")), false).is_yes(), "the minimum itself is supported");
+        assert!(check_driver(Some(&d("12-23-2024")), false).reason().unwrap().contains("older"));
+        assert!(check_driver(Some(&d("3-1-2026")), false).is_yes(), "newer drivers are not refused");
+        assert!(check_driver(Some(&d("10-1-2026")), false).is_yes());
+        assert!(check_driver(Some(&d("6-1-2024")), true).is_yes(), "the override skips the check");
         assert!(check_driver(Some(&d("garbage")), false).reason().unwrap().contains(ANY_VERSION_ENV));
         let stopped = DriverInfo { running: false, problem: 22, ..d("8-14-2025") };
         assert!(check_driver(Some(&stopped), true).reason().unwrap().contains("problem code 22"));

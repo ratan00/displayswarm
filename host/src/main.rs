@@ -257,6 +257,14 @@ fn apply_state(ui: &MainWindow, st: &StateInfo, full: bool) {
                 _ => SharedString::new(),
             })
             .collect();
+        let (reasons, notice) = split_role_reasons(reasons);
+        let platform = ui.global::<Platform>();
+        platform.set_role_notice(notice.into());
+        platform.set_role_notice_copy(if cfg!(windows) && platform.get_role_notice().contains("winget install") {
+            WINGET_VDD_COMMAND.into()
+        } else {
+            SharedString::new()
+        });
         ui.set_role_available(ModelRc::new(VecModel::from(available)));
         ui.set_role_reasons(ModelRc::new(VecModel::from(reasons)));
     }
@@ -357,13 +365,60 @@ fn apply(ui: &MainWindow, msg: UiMsg) {
     }
 }
 
+/// The command that installs the Windows virtual display driver.
+const WINGET_VDD_COMMAND: &str = "winget install --id=VirtualDrivers.Virtual-Display-Driver -e";
+
+/// Role cards have room for a few words. A long reason becomes a short label
+/// on the card and appears once, in full, as a notice under the cards.
+fn split_role_reasons(reasons: Vec<SharedString>) -> (Vec<SharedString>, String) {
+    let mut notice: Vec<String> = Vec::new();
+    let short: Vec<SharedString> = reasons
+        .into_iter()
+        .map(|r| {
+            if r.chars().count() <= 60 {
+                return r;
+            }
+            let label = if r.contains("virtual display driver") || r.contains("Virtual Display Driver") {
+                "Needs the virtual display driver"
+            } else {
+                "Not available, see the note below"
+            };
+            if !notice.iter().any(|n| n == r.as_str()) {
+                notice.push(r.to_string());
+            }
+            label.into()
+        })
+        .collect();
+    (short, notice.join("\n"))
+}
+
+/// Platform-specific wording in the window.
+fn apply_platform_text(ui: &MainWindow) {
+    let p = ui.global::<Platform>();
+    if cfg!(windows) {
+        p.set_monitor_hint(r"e.g. \\.\DISPLAY1 (or just 1); empty uses the main monitor".into());
+        p.set_scale_hint("Sets the monitor's scale from the device's density. Applies on the next connection.".into());
+    } else {
+        p.set_scale_hint("Sets the monitor's scale from the device's density (KDE, GNOME). Applies on the next connection.".into());
+    }
+    p.on_copy_text(|text| {
+        let status = copy_to_clipboard(text.as_str());
+        log::info!("{status}");
+    });
+}
+
 /// Copies through whichever clipboard tool exists; as a last resort writes the
 /// text to a file. Returns what to tell the user. (Slint has no clipboard API
 /// for plain strings.)
 fn copy_to_clipboard(text: &str) -> String {
     use std::io::Write;
     use std::process::{Command, Stdio};
-    for (bin, args) in [("wl-copy", &[][..]), ("xclip", &["-selection", "clipboard"][..]), ("xsel", &["-ib"][..])] {
+    let tools: &[(&str, &[&str])] = if cfg!(windows) {
+        &[("clip", &[])]
+    } else {
+        &[("wl-copy", &[]), ("xclip", &["-selection", "clipboard"]), ("xsel", &["-ib"])]
+    };
+    for &(bin, args) in tools {
         if let Ok(mut child) = Command::new(bin).args(args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(text.as_bytes());
@@ -820,6 +875,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let ui = MainWindow::new()?;
+    apply_platform_text(&ui);
     let model = Rc::new(VecModel::<DeviceRow>::default());
     STATE.with(|s| s.borrow_mut().model = Some(model.clone()));
     ui.set_devices(ModelRc::from(model));
