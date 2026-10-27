@@ -13,6 +13,8 @@ pub mod windows_probe;
 pub mod windows_dxgi;
 #[cfg(target_os = "windows")]
 pub mod windows_wgc;
+#[cfg(all(test, target_os = "windows", feature = "encoders"))]
+mod windows_bench;
 
 // Native Wayland screencast (portal + PipeWire + DMA-BUF). This is the
 // replacement for xcap on KWin 6, which only offers DMA-BUF buffers.
@@ -46,6 +48,7 @@ pub struct Frame {
 /// DMA-BUF. The VA-API encoder imports it and scales and converts it on the
 /// GPU, so no pixel crosses the CPU (before: the CPU read every frame out of
 /// GPU memory, scaled it and converted it to NV12, then uploaded it again).
+#[cfg(not(windows))]
 #[derive(Debug)]
 pub struct GpuFrame {
     #[cfg(unix)]
@@ -57,6 +60,21 @@ pub struct GpuFrame {
     pub modifier: u64,
     /// DRM fourcc, e.g. XRGB8888 for BGRx.
     pub drm_format: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Windows: a Direct3D 11 BGRA texture on the capture device, holding the
+/// newest Windows.Graphics.Capture frame (a copy out of the capture pool, so
+/// the pool can keep recycling). The QSV encoder's video processor scales and
+/// converts it to NV12 on the same device (`encoder/zerocopy_win.rs`).
+#[cfg(windows)]
+#[derive(Debug)]
+pub struct GpuFrame {
+    pub device: windows::Win32::Graphics::Direct3D11::ID3D11Device,
+    pub context: windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
+    pub texture: windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+    /// The picture's size inside the texture (top-left corner).
     pub width: u32,
     pub height: u32,
 }

@@ -36,6 +36,11 @@ pub const LIBX264: &str = "libx264";
 
 const VAAPI_COMPRESSION_LEVEL: i32 = 4;
 
+#[cfg(target_os = "windows")]
+type HwFrames = super::zerocopy_win::D3d11Hw;
+#[cfg(not(target_os = "windows"))]
+type HwFrames = ();
+
 pub(super) fn av_err(code: c_int) -> String {
     let mut buf = [0i8; 128];
     // Safety: buf is a valid writable buffer of the stated size.
@@ -171,6 +176,11 @@ impl Drop for Inner {
 
 impl Inner {
     fn open(cfg: &Config) -> Result<Self, BoxError> {
+        Self::open_with(cfg, None)
+    }
+
+    /// `hw`: take Direct3D 11 frames from the zero-copy importer (QSV on Windows).
+    fn open_with(cfg: &Config, hw: Option<&HwFrames>) -> Result<Self, BoxError> {
         let name = CString::new(cfg.codec).unwrap();
         // Safety: plain libavcodec setup; every pointer is checked before use and
         // `Inner::drop` releases whatever was created if we bail out part-way.
@@ -272,7 +282,20 @@ impl Inner {
                 c.hw_frames_ctx = av_buffer_ref(this.hw_frames);
                 c.pix_fmt = AVPixelFormat::AV_PIX_FMT_VAAPI;
             } else {
-                c.pix_fmt = AVPixelFormat::AV_PIX_FMT_NV12;
+                #[cfg(target_os = "windows")]
+                if let Some(hw) = hw {
+                    // Zero-copy QSV: Direct3D 11 NV12 textures derived to QSV surfaces.
+                    c.hw_frames_ctx = hw.frames_ref();
+                    c.hw_device_ctx = hw.device_ref();
+                    c.pix_fmt = AVPixelFormat::AV_PIX_FMT_QSV;
+                } else {
+                    c.pix_fmt = AVPixelFormat::AV_PIX_FMT_NV12;
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = hw;
+                    c.pix_fmt = AVPixelFormat::AV_PIX_FMT_NV12;
+                }
             }
 
             for (k, v) in private_options(cfg) {
@@ -342,8 +365,8 @@ impl Inner {
         }
     }
 
-    /// Encodes a picture already in a VA surface (zero-copy capture).
-    #[cfg(target_os = "linux")]
+    /// Encodes a picture already in a hardware surface (zero-copy capture).
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     fn encode_surface(&mut self, surface: *mut AVFrame, pts: i64, force_idr: bool) -> Result<Vec<(Vec<u8>, bool)>, BoxError> {
         // Safety: `surface` is a live VA-API frame on this encoder's VADisplay.
         unsafe {
@@ -410,6 +433,24 @@ pub struct FfmpegEncoder {
     inner_gen: u64,
     #[cfg(target_os = "linux")]
     zc_gen: u64,
+    /// Zero-copy QSV encoder (Direct3D 11 frames), built on the first GPU frame.
+    #[cfg(target_os = "windows")]
+    wzc: Option<WinZc>,
+    /// Bumped with `inner_gen`; `wzc` follows the config it was opened with.
+    #[cfg(target_os = "windows")]
+    wzc_gen: u64,
+    /// For the CPU copy of a GPU frame when zero-copy fails mid-stream.
+    #[cfg(target_os = "windows")]
+    scaler: crate::capture::scale::Scaler,
+}
+
+/// The zero-copy pipeline on Windows: a second QSV context that takes
+/// Direct3D 11 frames, and the video processor feeding it.
+#[cfg(target_os = "windows")]
+struct WinZc {
+    // Field order matters: the codec goes before the pools it reads.
+    inner: Inner,
+    import: super::zerocopy_win::D3d11Import,
 }
 
 // Safety: the codec context and buffers are owned exclusively by this struct and
@@ -482,6 +523,12 @@ impl FfmpegEncoder {
                             crate::capture::set_gpu_frames(ok);
                             log::info!("{codec}: zero-copy capture {}", if ok { "on" } else if wanted { "unavailable (no DRM device)" } else { "off (DISPLAYSWARM_ZEROCOPY=0)" });
                         }
+                        #[cfg(target_os = "windows")]
+                        if codec == "h264_qsv" {
+                            let wanted = std::env::var("DISPLAYSWARM_ZEROCOPY").map(|v| v != "0").unwrap_or(true);
+                            crate::capture::set_gpu_frames(wanted);
+                            log::info!("{codec}: zero-copy capture {}", if wanted { "on (checked on the first frame)" } else { "off (DISPLAYSWARM_ZEROCOPY=0)" });
+                        }
                         return Ok(Self {
                             cfg,
                             inner,
@@ -495,6 +542,12 @@ impl FfmpegEncoder {
                             inner_gen: 0,
                             #[cfg(target_os = "linux")]
                             zc_gen: 0,
+                            #[cfg(target_os = "windows")]
+                            wzc: None,
+                            #[cfg(target_os = "windows")]
+                            wzc_gen: 0,
+                            #[cfg(target_os = "windows")]
+                            scaler: crate::capture::scale::Scaler::new(),
                         });
                     }
                     Err(e) => {
@@ -591,8 +644,82 @@ impl FfmpegEncoder {
     }
 }
 
+#[cfg(target_os = "windows")]
+impl FfmpegEncoder {
+    /// Zero-copy: the frame is a Direct3D 11 texture; the GPU scales, converts
+    /// and encodes it. Any failure turns GPU frames off for good and this frame
+    /// is encoded from a CPU copy, so nothing is lost on a still screen.
+    fn encode_gpu(&mut self, frame: &Frame, g: &crate::capture::GpuFrame) -> Result<Vec<EncodedPacket>, BoxError> {
+        use super::zerocopy_win::{D3d11Import};
+        if self.cfg.codec != "h264_qsv" {
+            crate::capture::set_gpu_frames(false);
+            return self.encode_gpu_on_cpu(frame, g);
+        }
+        let mut want_idr = self.idr.is_due(frame.timestamp_us);
+        self.apply_pending_bitrate(want_idr);
+        if self.wzc.as_ref().is_some_and(|z| !z.import.matches(g) || self.wzc_gen != self.inner_gen) {
+            self.wzc = None;
+        }
+        if self.wzc.is_none() {
+            let built = D3d11Import::new(g, self.cfg.width, self.cfg.height).and_then(|import| {
+                let inner = Inner::open_with(&self.cfg, Some(import.hw()))?;
+                Ok(WinZc { inner, import })
+            });
+            match built {
+                Ok(z) => {
+                    log::info!("{}: zero-copy capture on ({}x{} texture -> {}x{} NV12)", self.cfg.codec, g.width, g.height, self.cfg.width, self.cfg.height);
+                    self.packetizer.set_config(&z.inner.extradata());
+                    self.wzc = Some(z);
+                    self.wzc_gen = self.inner_gen;
+                    want_idr = true; // a new context starts with an IDR
+                }
+                Err(e) => {
+                    log::warn!("{}: zero-copy capture unavailable ({e}); using CPU frames", self.cfg.codec);
+                    crate::capture::set_gpu_frames(false);
+                    return self.encode_gpu_on_cpu(frame, g);
+                }
+            }
+        }
+        let pts = (frame.timestamp_us as i64).max(self.last_pts + 1);
+        let z = self.wzc.as_mut().expect("just built");
+        let out = z
+            .import
+            .process(g)
+            .and_then(|surface| z.inner.encode_surface(surface, pts, want_idr));
+        match out {
+            Ok(out) => {
+                self.last_pts = pts;
+                Ok(self.packets(out, frame.timestamp_us))
+            }
+            Err(e) => {
+                log::warn!("{}: zero-copy frame failed ({e}); using CPU frames", self.cfg.codec);
+                self.wzc = None;
+                crate::capture::set_gpu_frames(false);
+                self.idr.request();
+                self.encode_gpu_on_cpu(frame, g)
+            }
+        }
+    }
+
+    /// Reads the texture back, fits it to the encoder's size and encodes it
+    /// on the CPU path (the capture then keeps sending CPU frames).
+    fn encode_gpu_on_cpu(&mut self, frame: &Frame, g: &crate::capture::GpuFrame) -> Result<Vec<EncodedPacket>, BoxError> {
+        let raw = g.read_bgra()?;
+        let (w, h) = (self.cfg.width, self.cfg.height);
+        let mut data = vec![0u8; w as usize * h as usize * 4];
+        self.scaler.scale(&raw.data, raw.width, raw.height, raw.width as usize * 4, &mut data, w, h);
+        self.idr.request();
+        let cpu = Frame { width: w, height: h, format: crate::capture::PixelFormat::Bgra, data, timestamp_us: frame.timestamp_us, gpu: None };
+        self.encode(&cpu)
+    }
+}
+
 impl VideoEncoder for FfmpegEncoder {
     fn encode(&mut self, frame: &Frame) -> Result<Vec<EncodedPacket>, BoxError> {
+        #[cfg(target_os = "windows")]
+        if let Some(g) = frame.gpu.clone() {
+            return self.encode_gpu(frame, &g);
+        }
         #[cfg(target_os = "linux")]
         if let Some(g) = frame.gpu.clone() {
             return self.encode_gpu(frame, &g);

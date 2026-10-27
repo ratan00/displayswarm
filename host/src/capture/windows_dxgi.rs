@@ -107,7 +107,15 @@ pub fn read_texture(
         let src = std::slice::from_raw_parts(mapped.pData as *const u8, pitch * desc.Height as usize);
         let data = copy_rows(src, pitch, w, h);
         d3d.context.Unmap(stage, 0);
-        Ok(RawFrame { width: w, height: h, data })
+        Ok(RawFrame::cpu(w, h, data))
+    }
+}
+
+impl crate::capture::GpuFrame {
+    /// The picture as a CPU copy, for when zero-copy fails.
+    pub fn read_bgra(&self) -> Result<RawFrame, String> {
+        let d3d = D3d { device: self.device.clone(), context: self.context.clone() };
+        read_texture(&d3d, &self.texture, &mut None, self.width, self.height)
     }
 }
 

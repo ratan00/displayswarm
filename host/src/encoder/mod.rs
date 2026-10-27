@@ -12,6 +12,8 @@ pub mod stream;
 pub mod x264;
 #[cfg(all(feature = "encoders", target_os = "linux"))]
 pub mod zerocopy;
+#[cfg(all(feature = "encoders", target_os = "windows"))]
+pub mod zerocopy_win;
 
 #[cfg(all(test, feature = "encoders"))]
 mod bench;

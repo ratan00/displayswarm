@@ -14,13 +14,33 @@ use windows::Graphics::Capture::{Direct3D11CaptureFramePool, GraphicsCaptureItem
 use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Win32::Foundation::HWND;
-use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
+use windows::Win32::Graphics::Direct3D11::{
+    ID3D11Texture2D, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT,
+};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::System::WinRT::Direct3D11::{CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess};
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
 use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
 
+/// Time spent getting each picture out of the capture pool (GPU copy or CPU
+/// readback), for the benchmark in `windows_bench.rs`.
+#[derive(Default)]
+pub struct ReadbackStats {
+    us: std::sync::atomic::AtomicU64,
+    frames: std::sync::atomic::AtomicU64,
+}
+
+impl ReadbackStats {
+    /// `(total microseconds, frames)`.
+    pub fn get(&self) -> (u64, u64) {
+        (self.us.load(Ordering::Relaxed), self.frames.load(Ordering::Relaxed))
+    }
+}
+
 pub struct WgcSource {
+    readback: Arc<ReadbackStats>,
     d3d: D3d,
     winrt_device: IDirect3DDevice,
     pool: Direct3D11CaptureFramePool,
@@ -28,6 +48,9 @@ pub struct WgcSource {
     item: GraphicsCaptureItem,
     pool_size: (i32, i32),
     staging: Option<(ID3D11Texture2D, u32, u32)>,
+    /// Zero-copy: textures the newest frames are copied into (see `copy_to_ring`).
+    ring: Vec<ID3D11Texture2D>,
+    ring_next: usize,
     wake_rx: crossbeam_channel::Receiver<()>,
     closed: Arc<AtomicBool>,
     monitor: Option<MonitorInfo>,
@@ -37,6 +60,7 @@ pub struct WgcSource {
 // Used only from the capture thread; the WinRT objects are agile.
 unsafe impl Send for WgcSource {}
 
+const RING_LEN: usize = 4;
 const FORMAT: DirectXPixelFormat = DirectXPixelFormat::B8G8R8A8UIntNormalized;
 
 impl WgcSource {
@@ -94,6 +118,7 @@ impl WgcSource {
         let _ = session.SetIsBorderRequired(false);
         session.StartCapture().map_err(|e| e.to_string())?;
         Ok(Self {
+            readback: Arc::default(),
             d3d,
             winrt_device,
             pool,
@@ -101,11 +126,62 @@ impl WgcSource {
             item,
             pool_size: (size.Width, size.Height),
             staging: None,
+            ring: Vec::new(),
+            ring_next: 0,
             wake_rx,
             closed,
             monitor,
             label,
         })
+    }
+
+    pub fn readback_stats(&self) -> Arc<ReadbackStats> {
+        self.readback.clone()
+    }
+
+    /// Copies the captured picture (GPU to GPU, ~0.1 ms) into the next ring
+    /// texture and hands that out, so the capture pool's surface goes back at
+    /// once. The ring is deeper than the frames in flight (slot, encoder,
+    /// repeat-last); even a stale texture only shows a newer picture, never a
+    /// torn one, because all work goes through the device's one immediate context.
+    fn copy_to_ring(&mut self, tex: &ID3D11Texture2D, cw: u32, ch: u32) -> Result<Arc<crate::capture::GpuFrame>, String> {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { tex.GetDesc(&mut desc) };
+        let stale = self.ring.first().map_or(true, |r| {
+            let mut d = D3D11_TEXTURE2D_DESC::default();
+            unsafe { r.GetDesc(&mut d) };
+            (d.Width, d.Height, d.Format) != (desc.Width, desc.Height, desc.Format)
+        });
+        if stale {
+            self.ring.clear();
+            let rd = D3D11_TEXTURE2D_DESC {
+                MipLevels: 1,
+                ArraySize: 1,
+                Usage: D3D11_USAGE_DEFAULT,
+                BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32,
+                CPUAccessFlags: 0,
+                MiscFlags: 0,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                ..desc
+            };
+            for _ in 0..RING_LEN {
+                let mut t: Option<ID3D11Texture2D> = None;
+                unsafe { self.d3d.device.CreateTexture2D(&rd, None, Some(&mut t)) }.map_err(|e| format!("CreateTexture2D: {e}"))?;
+                self.ring.push(t.ok_or("no ring texture")?);
+            }
+            self.ring_next = 0;
+        }
+        let dst = self.ring[self.ring_next].clone();
+        self.ring_next = (self.ring_next + 1) % self.ring.len();
+        let region = D3D11_BOX { left: 0, top: 0, front: 0, right: cw.min(desc.Width), bottom: ch.min(desc.Height), back: 1 };
+        unsafe { self.d3d.context.CopySubresourceRegion(&dst, 0, 0, 0, 0, tex, 0, Some(&region)) };
+        Ok(Arc::new(crate::capture::GpuFrame {
+            device: self.d3d.device.clone(),
+            context: self.d3d.context.clone(),
+            texture: dst,
+            width: region.right,
+            height: region.bottom,
+        }))
     }
 
     /// The newest queued frame, dropping older ones.
@@ -119,7 +195,20 @@ impl WgcSource {
         let surface = frame.Surface().map_err(|e| e.to_string())?;
         let access: IDirect3DDxgiInterfaceAccess = surface.cast().map_err(|e| e.to_string())?;
         let tex: ID3D11Texture2D = unsafe { access.GetInterface() }.map_err(|e| e.to_string())?;
-        let raw = read_texture(&self.d3d, &tex, &mut self.staging, content.Width.max(1) as u32, content.Height.max(1) as u32)?;
+        let (cw, ch) = (content.Width.max(1) as u32, content.Height.max(1) as u32);
+        let started = std::time::Instant::now();
+        let raw = match crate::capture::gpu_frames_enabled().then(|| self.copy_to_ring(&tex, cw, ch)) {
+            Some(Ok(g)) => RawFrame { width: cw, height: ch, data: Vec::new(), gpu: Some(g) },
+            Some(Err(e)) => {
+                // Same as a failed import in the encoder: back to CPU frames for good.
+                log::warn!("Windows capture: zero-copy frame failed ({e}); using CPU frames");
+                crate::capture::set_gpu_frames(false);
+                read_texture(&self.d3d, &tex, &mut self.staging, cw, ch)?
+            }
+            None => read_texture(&self.d3d, &tex, &mut self.staging, cw, ch)?,
+        };
+        self.readback.us.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+        self.readback.frames.fetch_add(1, Ordering::Relaxed);
         // The target was resized: rebuild the pool at the new size for the next frames.
         if (content.Width, content.Height) != self.pool_size {
             self.pool_size = (content.Width, content.Height);

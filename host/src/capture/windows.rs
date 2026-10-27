@@ -41,6 +41,15 @@ pub struct RawFrame {
     pub width: u32,
     pub height: u32,
     pub data: Vec<u8>,
+    /// Zero-copy: the picture is still in GPU memory (`data` is empty); only
+    /// produced while [`super::gpu_frames_enabled`].
+    pub gpu: Option<std::sync::Arc<super::GpuFrame>>,
+}
+
+impl RawFrame {
+    pub fn cpu(width: u32, height: u32, data: Vec<u8>) -> Self {
+        Self { width, height, data, gpu: None }
+    }
 }
 
 /// A producer of native-size frames (WGC, DXGI, or a test double).
@@ -246,6 +255,10 @@ impl WindowsCapturer {
 
     fn fit(&mut self, raw: RawFrame) -> Frame {
         let ts = host_monotonic_us();
+        if let Some(g) = raw.gpu {
+            // Zero-copy: the encoder's video processor scales and converts it.
+            return Frame { width: self.out_w, height: self.out_h, format: PixelFormat::Bgra, data: Vec::new(), timestamp_us: ts, gpu: Some(g) };
+        }
         if raw.width == self.out_w && raw.height == self.out_h {
             return Frame { width: raw.width, height: raw.height, format: PixelFormat::Bgra, data: raw.data, timestamp_us: ts, gpu: None };
         }
@@ -390,7 +403,7 @@ pub fn unrotate_bgra(raw: RawFrame, rotation: Rotation) -> RawFrame {
             out[(ny * ow + nx) * 4..][..4].copy_from_slice(&raw.data[(y * w + x) * 4..][..4]);
         }
     }
-    RawFrame { width: ow as u32, height: oh as u32, data: out }
+    RawFrame::cpu(ow as u32, oh as u32, out)
 }
 
 /// A top-level window as far as choosing one goes.
@@ -662,7 +675,7 @@ mod tests {
     }
 
     fn solid(w: u32, h: u32, v: u8) -> RawFrame {
-        RawFrame { width: w, height: h, data: vec![v; (w * h * 4) as usize] }
+        RawFrame::cpu(w, h, vec![v; (w * h * 4) as usize])
     }
 
     fn capturer(frames: Vec<Option<RawFrame>>, w: u32, h: u32) -> WindowsCapturer {
@@ -758,7 +771,7 @@ mod tests {
         for i in 0..(w * h) as usize {
             data[i * 4] = i as u8;
         }
-        RawFrame { width: w, height: h, data }
+        RawFrame::cpu(w, h, data)
     }
 
     fn firsts(f: &RawFrame) -> Vec<u8> {
@@ -786,7 +799,7 @@ mod tests {
             f = unrotate_bgra(f, Rotation::Rotate90);
         }
         assert_eq!(firsts(&f), [0, 1, 2, 3, 4, 5]);
-        let short = unrotate_bgra(RawFrame { width: 3, height: 2, data: vec![0; 8] }, Rotation::Rotate90);
+        let short = unrotate_bgra(RawFrame::cpu(3, 2, vec![0; 8]), Rotation::Rotate90);
         assert_eq!((short.width, short.height), (3, 2));
         assert_eq!(Rotation::from_dxgi(1), Rotation::None);
         assert_eq!(Rotation::from_dxgi(4), Rotation::Rotate270);
