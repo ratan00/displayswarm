@@ -346,16 +346,23 @@ pub fn unix_now() -> u64 {
 
 impl DeviceStore {
     /// Where the default store lives: `$XDG_CONFIG_HOME/displayswarm/devices.json`,
-    /// falling back to `~/.config`, or `None` when neither is known.
+    /// falling back to `~/.config` (on Windows `%APPDATA%`), or `None` when
+    /// neither is known.
     pub fn default_path() -> Option<PathBuf> {
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .or_else(|| {
-                std::env::var_os("HOME")
-                    .filter(|h| !h.is_empty())
-                    .map(|h| PathBuf::from(h).join(".config"))
-            })?;
+        let xdg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute());
+        #[cfg(not(windows))]
+        let base = xdg.or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|h| !h.is_empty())
+                .map(|h| PathBuf::from(h).join(".config"))
+        })?;
+        #[cfg(windows)]
+        let base = windows_config_base(
+            xdg,
+            std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()).map(PathBuf::from),
+            std::env::var_os("APPDATA").filter(|v| !v.is_empty()).map(PathBuf::from),
+            |p| p.is_dir(),
+        )?;
         Some(base.join("displayswarm").join("devices.json"))
     }
 
@@ -365,7 +372,11 @@ impl DeviceStore {
             Some(p) => Self::open(&p),
             None => Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                "no config directory (neither XDG_CONFIG_HOME nor HOME is set)",
+                if cfg!(windows) {
+                    "no config directory (neither XDG_CONFIG_HOME, APPDATA nor USERPROFILE is set)"
+                } else {
+                    "no config directory (neither XDG_CONFIG_HOME nor HOME is set)"
+                },
             )),
         }
     }
@@ -454,9 +465,44 @@ impl DeviceStore {
     }
 }
 
+/// Windows config base: `XDG_CONFIG_HOME` if set, else `%USERPROFILE%\.config`
+/// when a `displayswarm` directory already lives there (builds before this one
+/// used it whenever a shell set `HOME`, and the TLS identity phones pinned is
+/// in it), else `%APPDATA%`. `HOME` is ignored: Explorer and services do not set it.
+#[cfg(any(windows, test))]
+fn windows_config_base(
+    xdg: Option<PathBuf>,
+    profile: Option<PathBuf>,
+    appdata: Option<PathBuf>,
+    is_dir: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    if xdg.is_some() {
+        return xdg;
+    }
+    let legacy = profile.map(|p| p.join(".config"));
+    if let Some(l) = legacy.as_ref().filter(|l| is_dir(&l.join("displayswarm"))) {
+        return Some(l.clone());
+    }
+    appdata.or(legacy)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_config_prefers_an_existing_legacy_dir_then_appdata() {
+        let profile = Some(PathBuf::from(r"C:\Users\u"));
+        let appdata = Some(PathBuf::from(r"C:\Users\u\AppData\Roaming"));
+        let legacy = PathBuf::from(r"C:\Users\u\.config");
+        let xdg = Some(PathBuf::from(r"D:\cfg"));
+
+        assert_eq!(windows_config_base(xdg.clone(), profile.clone(), appdata.clone(), |_| true), xdg);
+        assert_eq!(windows_config_base(None, profile.clone(), appdata.clone(), |_| true), Some(legacy.clone()));
+        assert_eq!(windows_config_base(None, profile.clone(), appdata.clone(), |_| false), appdata);
+        assert_eq!(windows_config_base(None, profile, None, |_| false), Some(legacy));
+        assert_eq!(windows_config_base(None, None, None, |_| false), None);
+    }
 
     fn temp_path(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("displayswarm-devices-{}-{name}", std::process::id()));
