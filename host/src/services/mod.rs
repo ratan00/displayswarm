@@ -40,7 +40,8 @@ pub const HOST_FEATURES: u32 = FEATURE_TOUCH
     | FEATURE_STYLUS
     | FEATURE_KEYBOARD
     | FEATURE_AUDIO_OUT
-    | FEATURE_MIC
+    // A virtual microphone needs a driver; Windows has none.
+    | (if cfg!(target_os = "windows") { 0 } else { FEATURE_MIC })
     | FEATURE_CLIPBOARD
     | FEATURE_BATTERY;
 

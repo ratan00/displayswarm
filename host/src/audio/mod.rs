@@ -8,14 +8,25 @@
 //!
 //! Dropping either service removes its virtual device.
 //!
-//! PipeWire and Opus are Linux-only dependencies. Other platforms build only
-//! the device-independent [`sync`] hub and a stub [`audio_services`] that
-//! offers no service (Windows WASAPI loopback is W3).
+//! Windows has [`win_service::AudioOutService`] only: a WASAPI loopback of the
+//! default output ([`loopback`]), Opus-encoded the same way. There is no
+//! virtual microphone (it would need a driver) and the laptop's speakers
+//! cannot be delayed, so the host does not offer `FEATURE_MIC` there.
+//!
+//! PipeWire is a Linux-only dependency. Other platforms build only the
+//! device-independent [`sync`] hub and a stub [`audio_services`] that offers
+//! no service.
 
 pub mod sync;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub mod codec;
+#[cfg(any(target_os = "windows", test))]
+pub mod pcm;
+#[cfg(target_os = "windows")]
+pub mod loopback;
+#[cfg(target_os = "windows")]
+pub mod win_service;
 #[cfg(target_os = "linux")]
 pub mod delay;
 #[cfg(target_os = "linux")]
@@ -26,8 +37,11 @@ pub mod sink;
 #[cfg(target_os = "linux")]
 pub use service::{audio_services, AudioOutService, MicService};
 
-/// No audio services off Linux yet: the session simply has no audio channel.
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+pub use win_service::{audio_services, AudioOutService};
+
+/// No audio services on other platforms: the session simply has no audio channel.
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub fn audio_services(_ctx: &crate::services::ServiceCtx) -> Vec<Box<dyn crate::services::SessionService>> {
     Vec::new()
 }
