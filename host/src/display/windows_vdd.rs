@@ -950,12 +950,27 @@ impl<S: VddSystem> VirtualMonitorProvider for VddProvider<S> {
     }
 
     fn add(&self, mode: Mode) -> Result<Box<dyn VirtualMonitor>, DisplayError> {
-        Ok(Box::new(self.add_monitor(mode, &AtomicBool::new(false))?))
+        Ok(Box::new(self.add_monitor(capped(mode, max_refresh_mhz()), &AtomicBool::new(false))?))
     }
 
     fn add_cancellable(&self, mode: Mode, cancel: &AtomicBool) -> Result<Box<dyn VirtualMonitor>, DisplayError> {
-        Ok(Box::new(self.add_monitor(mode, cancel)?))
+        Ok(Box::new(self.add_monitor(capped(mode, max_refresh_mhz()), cancel)?))
     }
+}
+
+/// Highest refresh rate given to a driver monitor. The stream is 60 fps, and a
+/// 90/120 Hz monitor next to a 60 Hz panel makes the compositor stutter on both
+/// (badly on integrated GPUs). `DISPLAYSWARM_VDD_MAX_HZ` raises it.
+fn max_refresh_mhz() -> u32 {
+    std::env::var("DISPLAYSWARM_VDD_MAX_HZ")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|&hz| hz >= 30)
+        .map_or(60_000, |hz| hz * 1000)
+}
+
+fn capped(mode: Mode, max_mhz: u32) -> Mode {
+    Mode { refresh_mhz: mode.refresh_mhz.min(max_mhz), ..mode }
 }
 
 /// A monitor added for one session.
@@ -1426,6 +1441,14 @@ mod tests {
     }
 
     #[test]
+    fn monitor_refresh_is_capped_to_the_stream_rate() {
+        assert_eq!(capped(PHONE, 60_000), Mode { refresh_mhz: 60_000, ..PHONE });
+        assert_eq!(capped(TABLET, 60_000), TABLET);
+        let fifty = Mode { refresh_mhz: 50_000, ..PHONE };
+        assert_eq!(capped(fifty, 60_000), fifty);
+    }
+
+    #[test]
     fn idle_driver_monitors_are_hinted_only_when_no_phone_uses_them() {
         let p = provider(FakeVdd::new(XML));
         assert!(p.hint_idle_monitors(), "the driver's default monitor is on the desktop");
@@ -1480,7 +1503,7 @@ mod tests {
         let m = p.add(PHONE).unwrap();
         assert_eq!(sys(&p).lock().attach_calls, 1);
         let (_, mode, pos) = sys(&p).lock().set_modes.last().cloned().unwrap();
-        assert_eq!(mode, PHONE);
+        assert_eq!(mode, capped(PHONE, 60_000), "90 Hz is capped to the stream's 60");
         assert!(pos.is_some(), "an attached-by-hand monitor is placed right of the desktop");
         assert!(m.locate().is_some());
     }
