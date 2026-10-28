@@ -675,6 +675,26 @@ impl<S: VddSystem> VddProvider<S> {
         }
     }
 
+    /// While the driver restarts for a reload it reports a problem code for a
+    /// few seconds (43, like a crash). A phone that connects then (often right
+    /// after startup, while [`recover`](Self::recover) reloads) must not be
+    /// told the driver is broken: wait for the reload to finish. Returns
+    /// whether there was a recent reload to wait for.
+    fn wait_for_reload(&self) -> bool {
+        let sys = &self.inner.sys;
+        // Taking the lock waits out a reload in progress (it holds the lock).
+        let last = self.inner.state.lock().unwrap_or_else(|e| e.into_inner()).last_reload;
+        let Some(last) = last else { return false };
+        let deadline = last + RELOAD_COOLDOWN + APPEAR_TIMEOUT;
+        while sys.now() < deadline {
+            if sys.driver().is_some_and(|d| d.running) {
+                break;
+            }
+            sys.sleep(POLL);
+        }
+        true
+    }
+
     fn add_monitor(&self, mode: Mode, cancel: &AtomicBool) -> Result<VddMonitor<S>, DisplayError> {
         let sys = &self.inner.sys;
         let started = sys.now();
@@ -921,7 +941,10 @@ impl<S: VddSystem> VirtualMonitorProvider for VddProvider<S> {
 
     fn availability(&self) -> Availability {
         let sys = &self.inner.sys;
-        let driver = sys.driver();
+        let mut driver = sys.driver();
+        if driver.as_ref().is_some_and(|d| !d.running) && self.wait_for_reload() {
+            driver = sys.driver();
+        }
         let verdict = check_driver(driver.as_ref(), self.inner.allow_any_version);
         if !verdict.is_yes() {
             return verdict;
@@ -1043,6 +1066,8 @@ pub mod fake {
         pub reload_breaks: bool,
         pub restarts: u32,
         pub elapsed: Duration,
+        /// The stopped driver runs again from this point in time.
+        pub driver_back_at: Option<Duration>,
     }
 
     pub const DIR: &str = "C:/VirtualDisplayDriver";
@@ -1078,6 +1103,7 @@ pub mod fake {
                     reload_breaks: false,
                     restarts: 0,
                     elapsed: Duration::ZERO,
+                    driver_back_at: None,
                 }),
                 base: Instant::now(),
             };
@@ -1130,7 +1156,14 @@ pub mod fake {
 
     impl VddSystem for FakeVdd {
         fn driver(&self) -> Option<DriverInfo> {
-            self.lock().driver.clone()
+            let mut s = self.lock();
+            if s.driver_back_at.is_some_and(|t| s.elapsed >= t) {
+                if let Some(d) = s.driver.as_mut() {
+                    d.running = true;
+                    d.problem = 0;
+                }
+            }
+            s.driver.clone()
         }
         fn settings_dir(&self) -> PathBuf {
             PathBuf::from(DIR)
@@ -1566,5 +1599,25 @@ mod tests {
         // Nothing to do the second time.
         p.recover();
         assert_eq!(sys(&p).lock().commands.len(), 1);
+    }
+
+    #[test]
+    fn a_driver_restarting_for_a_reload_is_waited_for() {
+        let p = provider(FakeVdd::new(XML));
+        p.inner.state.lock().unwrap().last_reload = Some(sys(&p).now());
+        {
+            let mut s = sys(&p).lock();
+            let d = s.driver.as_mut().unwrap();
+            d.running = false;
+            d.problem = 43;
+            s.driver_back_at = Some(Duration::from_secs(4));
+        }
+        assert!(p.availability().is_yes(), "{:?}", p.availability().reason());
+
+        // No reload going on: a stopped driver is reported at once.
+        let p = provider(FakeVdd::new(XML));
+        sys(&p).lock().driver.as_mut().unwrap().running = false;
+        assert!(p.availability().reason().is_some());
+        assert_eq!(sys(&p).lock().elapsed, Duration::ZERO);
     }
 }

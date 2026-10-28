@@ -67,7 +67,7 @@ struct Config {
     bitrate_kbps: u32,
     /// VA-API render node, if the backend needs one.
     device: Option<String>,
-    /// Try VDEnc low-power mode (VA-API only); falls back to the full encoder if it is refused.
+    /// Try VDEnc low-power mode (VA-API and QSV); falls back to the full encoder if it is refused.
     low_power: bool,
     /// Constant quality at this QP instead of CBR (wired links).
     qp: Option<u32>,
@@ -85,15 +85,24 @@ fn private_options(cfg: &Config) -> Vec<(&'static str, String)> {
             }
             o
         }
-        "h264_qsv" => vec![
-            ("async_depth", "1"),
-            ("preset", "veryfast"),
-            ("look_ahead", "0"),
-            // Hint for the driver's rate control; older runtimes reject it (ignored).
-            ("scenario", "displayremoting"),
-            ("forced_idr", "1"),
-            ("profile", "high"),
-        ],
+        "h264_qsv" => {
+            let mut o = vec![
+                ("async_depth", "1"),
+                ("preset", "veryfast"),
+                ("look_ahead", "0"),
+                // Hint for the driver's rate control; older runtimes reject it (ignored).
+                ("scenario", "displayremoting"),
+                ("forced_idr", "1"),
+                ("profile", "high"),
+            ];
+            // VDEnc: the fixed-function encoder. The full encoder runs its motion
+            // search on the shader cores the compositor draws with, which makes
+            // the whole desktop stutter on an integrated GPU.
+            if cfg.low_power {
+                o.push(("low_power", "1"));
+            }
+            o
+        }
         "h264_nvenc" => vec![
             ("preset", "p3"),
             ("tune", "ull"),
@@ -499,7 +508,7 @@ impl FfmpegEncoder {
         let mut last_err: BoxError = "no device".into();
         for device in candidate_devices(codec) {
             for low_power in [true, false] {
-                if low_power && codec != "h264_vaapi" {
+                if low_power && codec != "h264_vaapi" && codec != "h264_qsv" {
                     continue;
                 }
                 let cfg = Config { codec, width, height, fps, bitrate_kbps, device: device.clone(), low_power, qp };

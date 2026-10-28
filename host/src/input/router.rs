@@ -28,6 +28,8 @@ pub struct InputRouter {
     /// Pinch scale at which the last zoom notch was emitted.
     pinch_base: f32,
     warned_relative: bool,
+    /// Input messages logged so far (the first few, to see what the phone sends).
+    logged: u32,
 }
 
 /// Pinch scale change that makes one zoom notch.
@@ -37,6 +39,11 @@ impl InputRouter {
     /// Injects `msg` if it is an input message. Returns how many injector
     /// events succeeded (0 for anything that is not input).
     pub fn route(&mut self, msg: &Message, injector: &mut dyn InputInjector) -> u64 {
+        if self.logged < 20 {
+            self.logged += 1;
+            let s = format!("{msg:?}");
+            log::debug!("Input from the phone: {}", &s[..s.len().min(300)]);
+        }
         if !matches!(msg, Message::Scroll(_)) {
             // Any other input ends a scroll gesture, so a trackpad's residual
             // cannot leak into the next one.

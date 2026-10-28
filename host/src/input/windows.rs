@@ -338,6 +338,10 @@ pub struct WindowsPointerInjector {
     /// The modifier state currently held down, as a `KEY_FLAG_*` mask. The
     /// client re-sends the state of all four modifiers on every key event.
     pressed_modifiers: u8,
+    /// Touch injection was refused once: touch drives the mouse instead.
+    touch_as_mouse: bool,
+    /// The finger driving the mouse in that mode.
+    mouse_finger: Option<u8>,
 }
 
 // The synthetic device handles are plain kernel handles used from one thread at a time.
@@ -377,6 +381,8 @@ impl WindowsPointerInjector {
             mouse_buttons: 0,
             rel_frac: (0.0, 0.0),
             pressed_modifiers: 0,
+            touch_as_mouse: false,
+            mouse_finger: None,
         })
     }
 
@@ -407,6 +413,7 @@ fn send_mouse(flags: MOUSE_EVENT_FLAGS, dx: i32, dy: i32, data: i32) -> bool {
 
 impl InputInjector for WindowsPointerInjector {
     fn set_output_region(&mut self, region: Option<OutputRegion>) {
+        log::info!("Pointer input now maps onto {region:?}");
         self.region = region;
     }
 
@@ -467,10 +474,28 @@ impl InputInjector for WindowsPointerInjector {
             }
             // Synthetic pointers are positioned relative to the virtual screen's origin.
             let (px, py) = map::injection_point(x, y, virtual_screen());
+            if event.action == ACTION_DOWN {
+                log::debug!(
+                    "Pointer down ({:.3}, {:.3}) -> ({px}, {py}) on {:?}",
+                    event.x_norm,
+                    event.y_norm,
+                    self.region
+                );
+            }
             let ok = if event.event_type == INPUT_TYPE_STYLUS {
                 self.inject_pen(event, px, py)
+            } else if self.touch_as_mouse {
+                return self.touch_to_mouse(event, x, y);
+            } else if self.inject_touch(event, px, py) {
+                true
             } else {
-                self.inject_touch(event, px, py)
+                // Synthetic touch is refused on some setups (an indirect display
+                // driver's monitor, no touch digitizer support): the first finger
+                // drives the mouse from then on, so taps and drags still work.
+                let err = windows::core::Error::from_win32();
+                log::warn!("Touch injection failed at ({px}, {py}): {err}; using the mouse for touch from now on");
+                self.touch_as_mouse = true;
+                return self.touch_to_mouse(event, x, y);
             };
             return if ok { Ok(()) } else { Err("InjectSyntheticPointerInput failed".into()) };
         }
@@ -562,6 +587,20 @@ impl WindowsPointerInjector {
         };
         let frame = [POINTER_TYPE_INFO { r#type: PT_PEN, Anonymous: POINTER_TYPE_INFO_0 { penInfo: info } }];
         unsafe { InjectSyntheticPointerInput(dev, &frame) }.is_ok()
+    }
+
+    /// One finger as the left mouse button; other fingers are ignored.
+    fn touch_to_mouse(&mut self, e: &InputEvent, x: i32, y: i32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        match self.mouse_finger {
+            Some(id) if id != e.pointer_id => return Ok(()),
+            None if e.action != ACTION_DOWN => return Ok(()),
+            _ => {}
+        }
+        let lifted = e.action == ACTION_UP || e.action == ACTION_CANCEL;
+        self.mouse_finger = if lifted { None } else { Some(e.pointer_id) };
+        let mut m = e.clone();
+        m.flags = if lifted { 0 } else { crate::protocol::POINTER_FLAG_BTN_PRIMARY };
+        self.inject_mouse(&m, x, y)
     }
 
     fn inject_touch(&mut self, e: &InputEvent, x: i32, y: i32) -> bool {
