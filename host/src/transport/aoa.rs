@@ -447,11 +447,15 @@ async fn probe_and_switch_devices(devices: &[DeviceInfo], config: &AoaConfig) ->
         let port = match ControlPort::new(device, info).await {
             Ok(p) => p,
             Err(e) => {
+                // Access denied / sharing violation: another process has the interface open.
+                let busy = ["0x80070005", "0x80070020"].iter().any(|code| e.to_string().contains(code));
                 let hint = if cfg!(target_os = "windows") {
-                    if ifaces.iter().any(|&(_, c, s, p, _)| is_adb_interface(c, s, p)) {
+                    if !ifaces.iter().any(|&(_, c, s, p, _)| is_adb_interface(c, s, p)) {
+                        "no WinUSB interface is available: turn on USB debugging so the ADB interface appears (or use Wi-Fi)"
+                    } else if busy {
                         "the adb server probably holds the ADB interface: run `adb kill-server` (or use Wi-Fi)"
                     } else {
-                        "no WinUSB interface is available: turn on USB debugging so the ADB interface appears (or use Wi-Fi)"
+                        "the ADB interface could not be opened"
                     }
                 } else {
                     "check the udev rule / permissions (or use Wi-Fi)"

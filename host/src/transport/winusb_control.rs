@@ -27,7 +27,7 @@ use windows::Win32::Devices::Usb::{
 };
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
 use windows::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_OVERLAPPED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 
 /// The adb interface GUID (`ANDROID_USB_CLASS_ID`), registered by WinUSB for the
@@ -115,7 +115,8 @@ impl WinUsbControl {
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 None,
                 OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
+                // WinUsb_Initialize rejects a handle opened without it ("The handle is invalid").
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
                 HANDLE::default(),
             )
         }

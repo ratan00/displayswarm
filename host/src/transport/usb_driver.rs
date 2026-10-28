@@ -92,8 +92,9 @@ fn run_elevated(uninstall: bool) -> Result<String, String> {
     write("install.ps1", SCRIPT)?;
     let log = dir.join("install.log");
 
-    // Paths come from the temp dir (no quotes or newlines), so single quotes suffice.
-    let quote = |p: &std::path::Path| format!("'{}'", p.display().to_string().replace('\'', "''"));
+    // Double quotes: `-File` takes its arguments from the raw command line, where
+    // single quotes are ordinary characters. Temp paths contain no `"`.
+    let quote = |p: &std::path::Path| format!("\"{}\"", p.display());
     let inner = format!(
         "-NoProfile -ExecutionPolicy Bypass -File {} -Dir {} -LogFile {}{}",
         quote(&dir.join("install.ps1")),
