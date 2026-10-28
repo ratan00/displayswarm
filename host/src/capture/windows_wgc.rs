@@ -89,7 +89,12 @@ impl WgcSource {
         if !GraphicsCaptureSession::IsSupported().unwrap_or(false) {
             return Err("Windows.Graphics.Capture is not supported on this system".into());
         }
-        let d3d = create_device(None)?;
+        let adapter = monitor.as_ref().and_then(|m| super::windows_dxgi::adapter_for_output(&m.name));
+        let d3d = create_device(adapter.as_ref())?;
+        if let Ok(desc) = d3d.device.cast::<IDXGIDevice>().and_then(|d| unsafe { d.GetAdapter() }).and_then(|a| unsafe { a.GetDesc() }) {
+            let end = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
+            log::info!("Windows capture runs on {}", String::from_utf16_lossy(&desc.Description[..end]));
+        }
         let dxgi: IDXGIDevice = d3d.device.cast().map_err(|e| e.to_string())?;
         let winrt_device: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }
             .and_then(|d| d.cast())

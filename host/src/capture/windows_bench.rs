@@ -7,13 +7,11 @@
 //!   cargo test --release --features encoders --lib windows_bench -- --ignored --nocapture
 //!
 //! Env: `BENCH_SECS` (default 5), `BENCH_W`/`BENCH_H` (default 1600x720),
-//! `BENCH_FPS` (default 60), `DISPLAYSWARM_ZEROCOPY=0` for the CPU path only.
-//! It runs the CPU path first, then the zero-copy one, and prints both.
+//! `BENCH_FPS` (default 60), `DISPLAYSWARM_ZEROCOPY=1` to also run the zero-copy path.
 
 use super::windows::{RawSource, WindowsCapturer};
 use super::windows_wgc::WgcSource;
 use super::{ScreenCapturer, PixelFormat};
-use crate::encoder::VideoEncoder;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -39,6 +37,12 @@ impl Animation {
     fn start() -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let s2 = stop.clone();
+        // A zero-distance mouse move wakes a sleeping display.
+        unsafe {
+            use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT};
+            let mi = INPUT { r#type: INPUT_MOUSE, Anonymous: INPUT_0 { mi: MOUSEINPUT { dwFlags: MOUSEEVENTF_MOVE, ..Default::default() } } };
+            SendInput(&[mi], std::mem::size_of::<INPUT>() as i32);
+        }
         let thread = std::thread::spawn(move || unsafe {
             let hwnd: HWND = CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_NOACTIVATE,
@@ -195,10 +199,11 @@ fn run(label: &str, gpu: bool, secs: u64, w: u32, h: u32, fps: u32) {
 #[ignore = "needs a desktop session and a GPU; run by hand"]
 fn capture_to_encode_cpu_vs_zero_copy() {
     let (secs, w, h, fps) = (env_u32("BENCH_SECS", 5) as u64, env_u32("BENCH_W", 1600), env_u32("BENCH_H", 720), env_u32("BENCH_FPS", 60));
+    let _ = env_logger::builder().filter_level(log::LevelFilter::Info).try_init();
     let _anim = Animation::start();
     let _ = (PixelFormat::Bgra, <WgcSource as RawSource>::describe);
     run("CPU readback + SIMD scale/convert", false, secs, w, h, fps);
-    if std::env::var("DISPLAYSWARM_ZEROCOPY").map(|v| v != "0").unwrap_or(true) {
+    if std::env::var("DISPLAYSWARM_ZEROCOPY").map(|v| v == "1").unwrap_or(false) {
         run("zero-copy (D3D11 video processor -> QSV)", true, secs, w, h, fps);
     }
 }

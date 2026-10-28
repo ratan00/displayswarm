@@ -159,6 +159,14 @@ fn find_output(name: &str) -> Result<(IDXGIAdapter1, IDXGIOutput1, OutputRegion,
     Err(format!("DXGI has no output {name}"))
 }
 
+/// The GPU that drives the monitor `name`. On a hybrid laptop the default
+/// adapter can be the discrete GPU while the screen is on the integrated one;
+/// capturing with the wrong one makes every frame cross PCIe (and rules out
+/// handing the texture to the Intel encoder).
+pub fn adapter_for_output(name: &str) -> Option<IDXGIAdapter> {
+    find_output(name).ok().and_then(|(a, ..)| a.cast::<IDXGIAdapter>().ok())
+}
+
 impl DxgiSource {
     pub fn new(output_name: &str) -> Result<Self, String> {
         let (adapter, output, region, rotation) = find_output(output_name)?;

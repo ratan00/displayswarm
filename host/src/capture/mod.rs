@@ -71,9 +71,9 @@ pub struct GpuFrame {
 #[cfg(windows)]
 #[derive(Debug)]
 pub struct GpuFrame {
-    pub device: windows::Win32::Graphics::Direct3D11::ID3D11Device,
-    pub context: windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
-    pub texture: windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+    pub device: ::windows::Win32::Graphics::Direct3D11::ID3D11Device,
+    pub context: ::windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
+    pub texture: ::windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
     /// The picture's size inside the texture (top-left corner).
     pub width: u32,
     pub height: u32,

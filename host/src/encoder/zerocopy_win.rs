@@ -24,6 +24,11 @@ use ffmpeg_next::ffi::*;
 use windows::core::Interface;
 use windows::Win32::Foundation::{BOOL, RECT};
 use windows::Win32::Graphics::Direct3D11::*;
+// The ffmpeg bindings declare opaque structs of the same names; the real ones win.
+use windows::Win32::Graphics::Direct3D11::{
+    ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, ID3D11VideoContext, ID3D11VideoContext1, ID3D11VideoDevice,
+    ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorInputView, ID3D11VideoProcessorOutputView,
+};
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 
@@ -240,7 +245,7 @@ impl D3d11Import {
             // does on the CPU and the encoder signals in the VUI.
             video_context1.VideoProcessorSetStreamColorSpace1(&processor, 0, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
             video_context1.VideoProcessorSetOutputColorSpace1(&processor, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709);
-            let black = D3D11_VIDEO_COLOR { RGBA: D3D11_VIDEO_COLOR_RGBA { R: 0.0, G: 0.0, B: 0.0, A: 1.0 } };
+            let black = D3D11_VIDEO_COLOR { Anonymous: D3D11_VIDEO_COLOR_0 { RGBA: D3D11_VIDEO_COLOR_RGBA { R: 0.0, G: 0.0, B: 0.0, A: 1.0 } } };
             video_context.VideoProcessorSetOutputBackgroundColor(&processor, false, &black);
             let (fx, fy, fw, fh) = fit_rect(g.width, g.height, dw, dh);
             // Even sizes and offsets, as the chroma planes need.
@@ -352,7 +357,7 @@ impl D3d11Import {
             q.format = AVPixelFormat::AV_PIX_FMT_QSV as i32;
             q.hw_frames_ctx = av_buffer_ref(self.hw.qsv_frames);
             check(
-                av_hwframe_map(self.qsv_frame, self.d3d_frame, (AV_HWFRAME_MAP_READ | AV_HWFRAME_MAP_WRITE) as i32),
+                av_hwframe_map(self.qsv_frame, self.d3d_frame, (AV_HWFRAME_MAP_READ as i32) | (AV_HWFRAME_MAP_WRITE as i32)),
                 "map the NV12 texture to QSV",
             )?;
             q.width = self.dst.0 as i32;

@@ -89,6 +89,8 @@ fn private_options(cfg: &Config) -> Vec<(&'static str, String)> {
             ("async_depth", "1"),
             ("preset", "veryfast"),
             ("look_ahead", "0"),
+            // Hint for the driver's rate control; older runtimes reject it (ignored).
+            ("scenario", "displayremoting"),
             ("forced_idr", "1"),
             ("profile", "high"),
         ],
@@ -525,9 +527,9 @@ impl FfmpegEncoder {
                         }
                         #[cfg(target_os = "windows")]
                         if codec == "h264_qsv" {
-                            let wanted = std::env::var("DISPLAYSWARM_ZEROCOPY").map(|v| v != "0").unwrap_or(true);
+                            let wanted = std::env::var("DISPLAYSWARM_ZEROCOPY").map(|v| v == "1").unwrap_or(false);
                             crate::capture::set_gpu_frames(wanted);
-                            log::info!("{codec}: zero-copy capture {}", if wanted { "on (checked on the first frame)" } else { "off (DISPLAYSWARM_ZEROCOPY=0)" });
+                            log::info!("{codec}: zero-copy capture {}", if wanted { "on (checked on the first frame)" } else { "off (set DISPLAYSWARM_ZEROCOPY=1 to try it)" });
                         }
                         return Ok(Self {
                             cfg,
