@@ -7,7 +7,8 @@
 //!   cargo test --release --features encoders --lib windows_bench -- --ignored --nocapture
 //!
 //! Env: `BENCH_SECS` (default 5), `BENCH_W`/`BENCH_H` (default 1600x720),
-//! `BENCH_FPS` (default 60), `DISPLAYSWARM_ZEROCOPY=1` to also run the zero-copy path.
+//! `BENCH_FPS` (default 60), `BENCH_MONITOR` (e.g. `\\.\DISPLAY2`, default the
+//! main one), `DISPLAYSWARM_ZEROCOPY=1` to also run the zero-copy path.
 
 use super::windows::{RawSource, WindowsCapturer};
 use super::windows_wgc::WgcSource;
@@ -34,7 +35,7 @@ struct Animation {
 }
 
 impl Animation {
-    fn start() -> Self {
+    fn start(left: i32, top: i32) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let s2 = stop.clone();
         // A zero-distance mouse move wakes a sleeping display.
@@ -49,8 +50,8 @@ impl Animation {
                 w!("STATIC"),
                 w!("displayswarm bench"),
                 WS_POPUP | WS_VISIBLE,
-                0,
-                0,
+                left,
+                top,
                 1280,
                 720,
                 None,
@@ -111,7 +112,16 @@ fn run(label: &str, gpu: bool, secs: u64, w: u32, h: u32, fps: u32) {
         crate::capture::set_gpu_frames(false);
     }
     let backend = encoder.backend_name();
-    let mon = super::windows::sys::find_monitor(None).expect("no monitor");
+    let want = std::env::var("BENCH_MONITOR").ok();
+    let mon = super::windows::sys::find_monitor(want.as_deref()).expect("no monitor");
+    let (adapter, _) = super::windows_dxgi::pick_adapter(Some(&mon.name));
+    let owner = super::windows_dxgi::adapter_for_output(&mon.name);
+    let name = |a: Option<windows::Win32::Graphics::Dxgi::IDXGIAdapter>| {
+        a.and_then(|a| unsafe { a.GetDesc() }.ok())
+            .map(|d| String::from_utf16_lossy(&d.Description).trim_end_matches('\0').to_string())
+            .unwrap_or_else(|| "default".into())
+    };
+    println!("[{label}] monitor {} owned by {}, captured on {}", mon.name, name(owner), name(adapter));
     let source = WgcSource::for_monitor(&mon).expect("WGC");
     let readback = source.readback_stats();
     let mut capturer = WindowsCapturer::from_source(Box::new(source), w, h, None);
@@ -201,7 +211,9 @@ fn run(label: &str, gpu: bool, secs: u64, w: u32, h: u32, fps: u32) {
 fn capture_to_encode_cpu_vs_zero_copy() {
     let (secs, w, h, fps) = (env_u32("BENCH_SECS", 5) as u64, env_u32("BENCH_W", 1600), env_u32("BENCH_H", 720), env_u32("BENCH_FPS", 60));
     let _ = env_logger::builder().filter_level(log::LevelFilter::Info).try_init();
-    let _anim = Animation::start();
+    let want = std::env::var("BENCH_MONITOR").ok();
+    let at = super::windows::sys::find_monitor(want.as_deref()).map(|m| (m.rect.left, m.rect.top)).unwrap_or((0, 0));
+    let _anim = Animation::start(at.0, at.1);
     let _ = (PixelFormat::Bgra, <WgcSource as RawSource>::describe);
     run("CPU readback + SIMD scale/convert", false, secs, w, h, fps);
     if std::env::var("DISPLAYSWARM_ZEROCOPY").map(|v| v == "1").unwrap_or(false) {

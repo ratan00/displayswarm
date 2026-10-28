@@ -42,7 +42,9 @@ use windows::Win32::System::Registry::{RegCloseKey, RegGetValueW, HKEY, HKEY_LOC
 /// (waiting for the device to run and the monitor to appear) while the reply
 /// thread drains the pipe, instead of idling until the driver hangs up.
 const PIPE_ANSWER_TIMEOUT: Duration = Duration::from_millis(1500);
-const PIPE_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
+/// How long to retry while every pipe instance is busy (another command, often
+/// a reload for a monitor being added, still holds it).
+const PIPE_CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
 /// `ERROR_PIPE_BUSY`: every instance of the pipe is in use; try again.
 const ERROR_PIPE_BUSY: i32 = 231;
 /// `CREATE_NO_WINDOW`, so `pnputil` does not flash a console.
