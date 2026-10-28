@@ -1221,7 +1221,7 @@ async fn open_accessory_stream(
                 let path = format_bus_path(info.bus_id(), info.port_chain());
                 info_once(format!("{path}:driver"), || {
                     format!(
-                        "USB: the phone is in accessory mode ({:04x}:{:04x}) but Windows cannot open it ({e}); \\
+                        "USB: the phone is in accessory mode ({:04x}:{:04x}) but Windows cannot open it ({e}); \
                          install the USB driver once with `displayswarm-hostd --install-usb-driver` (asks for administrator rights)",
                         info.vendor_id(),
                         info.product_id()
