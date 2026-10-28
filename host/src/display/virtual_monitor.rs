@@ -49,6 +49,15 @@ pub trait VirtualMonitorProvider: Send + Sync {
     /// Adds a monitor at `mode` and waits until Windows shows it. Blocks for
     /// seconds (a driver reload): never call it on the async runtime.
     fn add(&self, mode: Mode) -> Result<Box<dyn VirtualMonitor>, DisplayError>;
+    /// [`add`](Self::add), abandoned (nothing changed or everything given back)
+    /// as soon as `cancel` is set: the phone left while the monitor was coming.
+    fn add_cancellable(
+        &self,
+        mode: Mode,
+        _cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<Box<dyn VirtualMonitor>, DisplayError> {
+        self.add(mode)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

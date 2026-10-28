@@ -13,6 +13,8 @@ pub mod windows_probe;
 pub mod windows_dxgi;
 #[cfg(target_os = "windows")]
 pub mod windows_wgc;
+#[cfg(target_os = "windows")]
+pub mod windows_vp;
 #[cfg(all(test, target_os = "windows", feature = "encoders"))]
 mod windows_bench;
 
@@ -29,6 +31,9 @@ pub mod restore_token;
 pub enum PixelFormat {
     Rgba,
     Bgra,
+    /// Already fitted to the encoder's size and converted (BT.709 limited): a
+    /// Y plane followed by the interleaved UV plane, both `width` bytes a row.
+    Nv12,
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +82,19 @@ pub struct GpuFrame {
     /// The picture's size inside the texture (top-left corner).
     pub width: u32,
     pub height: u32,
+}
+
+static CAPTURE_VENDOR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// The PCI vendor id of the GPU the encoder runs on (0 = unknown). The Windows
+/// capture creates its Direct3D device on that adapter so the picture never
+/// crosses GPUs on its way to the encoder.
+pub fn encoder_vendor() -> u32 {
+    CAPTURE_VENDOR.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_encoder_vendor(vendor: u32) {
+    CAPTURE_VENDOR.store(vendor, std::sync::atomic::Ordering::Relaxed);
 }
 
 static GPU_FRAMES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

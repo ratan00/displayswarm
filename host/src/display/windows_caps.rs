@@ -48,6 +48,7 @@ fn vdd() -> &'static VddProvider<WinVdd> {
 /// (blocks for a driver reload when there is something to restore).
 pub fn recover_leftovers() {
     vdd().recover();
+    vdd().hint_idle_monitors();
 }
 
 /// Which provider adds monitors here: our own driver (on hold, never

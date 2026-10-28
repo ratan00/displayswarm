@@ -47,7 +47,7 @@ use super::virtual_monitor::{
 };
 use super::{DisplayError, OutputRegion};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -81,8 +81,8 @@ pub const RELOAD_COOLDOWN: Duration = Duration::from_secs(3);
 /// How long a new monitor may take to show up after a reload.
 pub const APPEAR_TIMEOUT: Duration = Duration::from_secs(15);
 /// After this long present but detached, the monitor is attached by hand.
-pub const ATTACH_AFTER: Duration = Duration::from_secs(3);
-const POLL: Duration = Duration::from_millis(250);
+pub const ATTACH_AFTER: Duration = Duration::from_millis(1500);
+const POLL: Duration = Duration::from_millis(100);
 
 // ---------------------------------------------------------------------------
 // Settings file (pure string editing, comment-aware)
@@ -332,6 +332,11 @@ impl DisplayTarget {
     }
 }
 
+/// Active VDD monitors in `all`.
+pub fn idle_active_count(all: &[DisplayTarget]) -> usize {
+    all.iter().filter(|t| t.vdd && t.active).count()
+}
+
 /// The VDD targets in connector order. UNVERIFIED: that target ids follow the
 /// driver's `ConnectorIndex` order; it is the natural reading of IddCx and is
 /// only the fallback when the id itself changed across a reload.
@@ -532,6 +537,14 @@ impl<S: VddSystem> Clone for VddProvider<S> {
     }
 }
 
+fn cancelled(cancel: &AtomicBool) -> bool {
+    cancel.load(Ordering::SeqCst)
+}
+
+fn cancelled_err() -> DisplayError {
+    io_err("add a virtual monitor", "the phone left before the monitor was ready")
+}
+
 fn io_err(context: &str, detail: impl std::fmt::Display) -> DisplayError {
     DisplayError::Io { context: context.into(), detail: detail.to_string() }
 }
@@ -577,6 +590,29 @@ impl<S: VddSystem> VddProvider<S> {
         if let Err(e) = self.put_back(&mut st, &original) {
             log::warn!("Could not restore the Virtual Display Driver settings: {}", e.summary());
         }
+    }
+
+    /// Startup, once: Virtual Display Driver monitors that are on the desktop
+    /// while no phone uses them (the driver keeps its default monitor after
+    /// install) are logged, since they cost GPU time and make the PC feel slow.
+    /// DisplaySwarm leaves the user's own settings alone. Returns whether the
+    /// hint was logged.
+    pub fn hint_idle_monitors(&self) -> bool {
+        let st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        if st.original.is_some() {
+            return false; // a phone holds monitors: not idle
+        }
+        let active = idle_active_count(&self.inner.sys.targets());
+        if active == 0 {
+            return false;
+        }
+        log::info!(
+            "{active} Virtual Display Driver monitor(s) are on the desktop although no phone uses them. \
+             DisplaySwarm leaves your driver settings alone; if the PC feels slow, disable them with \
+             Win+P or set <count> in {} to 1 and detach the monitor in Display settings.",
+            self.settings_path().display()
+        );
+        true
     }
 
     /// Writes the user's file back, sets its count, and writes it once more:
@@ -639,12 +675,18 @@ impl<S: VddSystem> VddProvider<S> {
         }
     }
 
-    fn add_monitor(&self, mode: Mode) -> Result<VddMonitor<S>, DisplayError> {
+    fn add_monitor(&self, mode: Mode, cancel: &AtomicBool) -> Result<VddMonitor<S>, DisplayError> {
         let sys = &self.inner.sys;
+        let started = sys.now();
         if let Some(why) = self.availability().reason() {
             return Err(DisplayError::Unsupported { what: why.to_string() });
         }
         let mut st = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
+        // The phone left while this waited for the lock (another add or a
+        // release holds it for seconds): change nothing.
+        if cancelled(cancel) {
+            return Err(cancelled_err());
+        }
         let path = self.settings_path();
         // First monitor: remember the user's file (on disk too, for a crash).
         if st.original.is_none() {
@@ -675,9 +717,15 @@ impl<S: VddSystem> VddProvider<S> {
                 st.loaded = Some(settings);
             }
         }
-        let result = result.and_then(|()| self.wait_for(&before, connector, mode, needs_reload));
+        let reloaded_after = sys.now().saturating_duration_since(started);
+        let result = result.and_then(|()| self.wait_for(&before, connector, mode, needs_reload, cancel));
         match result {
             Ok(target) => {
+                log::debug!(
+                    "VDD add timing: driver reloaded after {} ms, monitor on the desktop after {} ms",
+                    reloaded_after.as_millis(),
+                    sys.now().saturating_duration_since(started).as_millis()
+                );
                 st.targets.retain(|(i, _)| *i != id);
                 st.targets.push((id, target.target_id));
                 if needs_reload {
@@ -737,11 +785,15 @@ impl<S: VddSystem> VddProvider<S> {
         connector: u32,
         mode: Mode,
         reloaded: bool,
+        cancel: &AtomicBool,
     ) -> Result<DisplayTarget, DisplayError> {
         let sys = &self.inner.sys;
         let start = sys.now();
         let mut attach_tried = false;
         loop {
+            if cancelled(cancel) {
+                return Err(cancelled_err());
+            }
             let after = sys.targets();
             // A reused slot is not new: find it by position.
             let added = if reloaded { find_added(before, &after, connector) } else { None };
@@ -898,7 +950,11 @@ impl<S: VddSystem> VirtualMonitorProvider for VddProvider<S> {
     }
 
     fn add(&self, mode: Mode) -> Result<Box<dyn VirtualMonitor>, DisplayError> {
-        Ok(Box::new(self.add_monitor(mode)?))
+        Ok(Box::new(self.add_monitor(mode, &AtomicBool::new(false))?))
+    }
+
+    fn add_cancellable(&self, mode: Mode, cancel: &AtomicBool) -> Result<Box<dyn VirtualMonitor>, DisplayError> {
+        Ok(Box::new(self.add_monitor(mode, cancel)?))
     }
 }
 
@@ -1342,6 +1398,45 @@ mod tests {
         assert!(!fake.has_backup());
         assert_eq!(fake.lock().commands.last().unwrap(), "SETDISPLAYCOUNT 1");
         assert_eq!(fake.lock().vdd_ids.len(), 1);
+    }
+
+    #[test]
+    fn an_add_cancelled_before_it_starts_changes_nothing() {
+        let p = provider(FakeVdd::new(XML));
+        let cancel = AtomicBool::new(true);
+        let e = p.add_cancellable(PHONE, &cancel).err().expect("cancelled");
+        assert!(e.summary().contains("left"), "{}", e.summary());
+        let fake = sys(&p);
+        assert_eq!(fake.settings(), XML);
+        assert!(!fake.has_backup());
+        assert!(fake.lock().commands.is_empty());
+    }
+
+    #[test]
+    fn a_monitor_that_arrives_after_its_phone_left_is_removed_again() {
+        // The session dropped the receiver, so the finished add is dropped at once.
+        let p = provider(FakeVdd::new(XML));
+        let m = p.add_cancellable(PHONE, &AtomicBool::new(false)).unwrap();
+        assert!(sys(&p).has_backup());
+        drop(m);
+        let fake = sys(&p);
+        assert_eq!(fake.settings(), XML);
+        assert!(!fake.has_backup());
+        assert_eq!(fake.lock().vdd_ids.len(), 1, "back to the driver's own monitor");
+    }
+
+    #[test]
+    fn idle_driver_monitors_are_hinted_only_when_no_phone_uses_them() {
+        let p = provider(FakeVdd::new(XML));
+        assert!(p.hint_idle_monitors(), "the driver's default monitor is on the desktop");
+        let m = p.add(PHONE).unwrap();
+        assert!(!p.hint_idle_monitors(), "a phone is using the driver");
+        drop(m);
+        let fake = FakeVdd::new(XML);
+        let ids = fake.lock().vdd_ids.clone();
+        fake.lock().detached.extend(ids);
+        assert!(!provider(fake).hint_idle_monitors(), "nothing active, nothing to say");
+        assert_eq!(idle_active_count(&[]), 0);
     }
 
     #[test]

@@ -4,6 +4,7 @@
 use super::windows::sys::MonitorInfo;
 use super::windows::{RawFrame, RawSource};
 use super::windows_dxgi::{create_device, read_texture, D3d};
+use super::windows_vp::Nv12Reader;
 use crate::display::OutputRegion;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -51,6 +52,10 @@ pub struct WgcSource {
     /// Zero-copy: textures the newest frames are copied into (see `copy_to_ring`).
     ring: Vec<ID3D11Texture2D>,
     ring_next: usize,
+    /// CPU fallback: GPU scale + NV12 conversion and an asynchronous readback
+    /// of the small picture (`None` until the output size is known, or when
+    /// the device cannot do it: then `read_texture` hands out full BGRA).
+    reader: Option<Nv12Reader>,
     wake_rx: crossbeam_channel::Receiver<()>,
     closed: Arc<AtomicBool>,
     monitor: Option<MonitorInfo>,
@@ -89,11 +94,11 @@ impl WgcSource {
         if !GraphicsCaptureSession::IsSupported().unwrap_or(false) {
             return Err("Windows.Graphics.Capture is not supported on this system".into());
         }
-        let adapter = monitor.as_ref().and_then(|m| super::windows_dxgi::adapter_for_output(&m.name));
+        let (adapter, why) = super::windows_dxgi::pick_adapter(monitor.as_ref().map(|m| m.name.as_str()));
         let d3d = create_device(adapter.as_ref())?;
         if let Ok(desc) = d3d.device.cast::<IDXGIDevice>().and_then(|d| unsafe { d.GetAdapter() }).and_then(|a| unsafe { a.GetDesc() }) {
             let end = desc.Description.iter().position(|&c| c == 0).unwrap_or(desc.Description.len());
-            log::info!("Windows capture runs on {}", String::from_utf16_lossy(&desc.Description[..end]));
+            log::info!("Windows capture runs on {} ({why})", String::from_utf16_lossy(&desc.Description[..end]));
         }
         let dxgi: IDXGIDevice = d3d.device.cast().map_err(|e| e.to_string())?;
         let winrt_device: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }
@@ -133,6 +138,7 @@ impl WgcSource {
             staging: None,
             ring: Vec::new(),
             ring_next: 0,
+            reader: None,
             wake_rx,
             closed,
             monitor,
@@ -190,7 +196,7 @@ impl WgcSource {
     }
 
     /// The newest queued frame, dropping older ones.
-    fn take_newest(&mut self) -> Result<Option<RawFrame>, String> {
+    fn submit_newest(&mut self) -> Result<Option<RawFrame>, String> {
         let mut newest = None;
         while let Ok(f) = self.pool.TryGetNextFrame() {
             newest = Some(f);
@@ -202,16 +208,30 @@ impl WgcSource {
         let tex: ID3D11Texture2D = unsafe { access.GetInterface() }.map_err(|e| e.to_string())?;
         let (cw, ch) = (content.Width.max(1) as u32, content.Height.max(1) as u32);
         let started = std::time::Instant::now();
-        let raw = match crate::capture::gpu_frames_enabled().then(|| self.copy_to_ring(&tex, cw, ch)) {
-            Some(Ok(g)) => RawFrame { width: cw, height: ch, data: Vec::new(), gpu: Some(g) },
+        let mut raw = match crate::capture::gpu_frames_enabled().then(|| self.copy_to_ring(&tex, cw, ch)) {
+            Some(Ok(g)) => Some(RawFrame { width: cw, height: ch, data: Vec::new(), gpu: Some(g), nv12: false }),
             Some(Err(e)) => {
                 // Same as a failed import in the encoder: back to CPU frames for good.
                 log::warn!("Windows capture: zero-copy frame failed ({e}); using CPU frames");
                 crate::capture::set_gpu_frames(false);
-                read_texture(&self.d3d, &tex, &mut self.staging, cw, ch)?
+                None
             }
-            None => read_texture(&self.d3d, &tex, &mut self.staging, cw, ch)?,
+            None => None,
         };
+        if raw.is_none() {
+            if let Some(reader) = self.reader.as_mut().filter(|_| !crate::capture::gpu_frames_enabled()) {
+                match reader.submit(&tex, cw, ch) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        log::warn!("Windows capture: GPU NV12 readback failed ({e}); reading BGRA");
+                        self.reader = None;
+                    }
+                }
+            }
+            if self.reader.is_none() {
+                raw = Some(read_texture(&self.d3d, &tex, &mut self.staging, cw, ch)?);
+            }
+        }
         self.readback.us.fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
         self.readback.frames.fetch_add(1, Ordering::Relaxed);
         // The target was resized: rebuild the pool at the new size for the next frames.
@@ -219,19 +239,44 @@ impl WgcSource {
             self.pool_size = (content.Width, content.Height);
             let _ = self.pool.Recreate(&self.winrt_device, FORMAT, 2, content);
         }
-        Ok(Some(raw))
+        Ok(raw)
     }
 }
 
 impl RawSource for WgcSource {
     fn next_raw(&mut self, timeout: Duration) -> Result<Option<RawFrame>, Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(f) = self.take_newest()? {
-            return Ok(Some(f));
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(f) = self.submit_newest()? {
+                return Ok(Some(f));
+            }
+            // A converted picture the GPU has finished, if any (never waits).
+            if let Some(f) = self.reader.as_mut().and_then(|r| r.poll().ok().flatten()) {
+                return Ok(Some(f));
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return Ok(None);
+            }
+            // While a readback is in flight, look again soon: the GPU needs
+            // well under a millisecond and the next WGC frame is far off.
+            let pending = self.reader.as_ref().is_some_and(|r| r.has_pending());
+            let _ = self.wake_rx.recv_timeout(if pending { left.min(Duration::from_micros(250)) } else { left });
         }
-        if self.wake_rx.recv_timeout(timeout).is_err() {
-            return Ok(None);
+    }
+
+    fn set_output_size(&mut self, width: u32, height: u32) {
+        let disabled = std::env::var("DISPLAYSWARM_GPU_NV12").map(|v| v == "0").unwrap_or(false);
+        if disabled || width % 2 != 0 || height % 2 != 0 {
+            return;
         }
-        Ok(self.take_newest()?)
+        match Nv12Reader::probe(&self.d3d, width, height) {
+            Ok(()) => {
+                log::info!("Windows capture: scale and NV12 conversion on the GPU for the CPU path ({width}x{height})");
+                self.reader = Some(Nv12Reader::new(D3d { device: self.d3d.device.clone(), context: self.d3d.context.clone() }, width, height));
+            }
+            Err(e) => log::warn!("Windows capture: GPU NV12 conversion unavailable ({e}); converting on the CPU"),
+        }
     }
 
     fn describe(&self) -> String {

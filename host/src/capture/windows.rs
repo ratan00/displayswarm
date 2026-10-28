@@ -44,11 +44,14 @@ pub struct RawFrame {
     /// Zero-copy: the picture is still in GPU memory (`data` is empty); only
     /// produced while [`super::gpu_frames_enabled`].
     pub gpu: Option<std::sync::Arc<super::GpuFrame>>,
+    /// `data` is NV12 at the capturer's output size already (the GPU did the
+    /// scaling and the conversion), not BGRA at the source's size.
+    pub nv12: bool,
 }
 
 impl RawFrame {
     pub fn cpu(width: u32, height: u32, data: Vec<u8>) -> Self {
-        Self { width, height, data, gpu: None }
+        Self { width, height, data, gpu: None, nv12: false }
     }
 }
 
@@ -65,10 +68,156 @@ pub trait RawSource: Send {
     fn region(&self) -> Option<OutputRegion> {
         None
     }
+    /// The size the capturer fits pictures to, so a source can do that on the GPU.
+    fn set_output_size(&mut self, _width: u32, _height: u32) {}
     /// Still getting ready (a virtual monitor being added): no frames yet, but
     /// not failed either.
     fn pending(&self) -> bool {
         false
+    }
+}
+
+/// Change detector for the monitor layout: `read` returns a signature of the
+/// current layout (see [`topology_signature`]); [`changed`](Self::changed) says
+/// so once a change has been stable for [`TOPOLOGY_SETTLE`] (Windows reshuffles
+/// for a moment when a monitor comes or goes).
+pub struct TopologyWatch {
+    read: Box<dyn Fn() -> u64 + Send>,
+    seen: u64,
+    changed_at: Option<Instant>,
+    last_read: Option<Instant>,
+}
+
+/// A layout change must hold this long before captures are rebuilt.
+const TOPOLOGY_SETTLE: Duration = Duration::from_millis(300);
+/// The layout is read at most this often.
+const TOPOLOGY_READ_GAP: Duration = Duration::from_millis(100);
+
+impl TopologyWatch {
+    pub fn new(read: Box<dyn Fn() -> u64 + Send>) -> Self {
+        let seen = read();
+        TopologyWatch { read, seen, changed_at: None, last_read: None }
+    }
+
+    /// True once per settled change.
+    pub fn changed(&mut self, now: Instant) -> bool {
+        if self.last_read.map_or(true, |t| now.saturating_duration_since(t) >= TOPOLOGY_READ_GAP) {
+            self.last_read = Some(now);
+            let cur = (self.read)();
+            if cur != self.seen {
+                self.seen = cur;
+                self.changed_at = Some(now);
+            }
+        }
+        match self.changed_at {
+            Some(t) if now.saturating_duration_since(t) >= TOPOLOGY_SETTLE => {
+                self.changed_at = None;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// A signature of a monitor layout: any monitor coming, going or moving changes it.
+pub fn topology_signature(monitors: &[(String, i32, i32, i32, i32)]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut sorted = monitors.to_vec();
+    sorted.sort();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    sorted.hash(&mut h);
+    h.finish()
+}
+
+/// Keeps a capture of a monitor alive across display changes: when the layout
+/// changes (a monitor added or removed, a device disabled), the capture item
+/// closes or goes silent, so the capture is re-created from `open` as soon as
+/// the change settles (about 0.3 s), and whenever the source reports itself
+/// dead or errors. Gives up only after [`MAX_REOPENS`] failed attempts in a row.
+pub struct ResilientSource {
+    inner: Option<Box<dyn RawSource>>,
+    open: Box<dyn Fn() -> Result<Box<dyn RawSource>, String> + Send>,
+    watch: TopologyWatch,
+    failed: Option<String>,
+    fails: u32,
+    next_try: Instant,
+}
+
+const MAX_REOPENS: u32 = 40;
+const REOPEN_GAP: Duration = Duration::from_millis(250);
+
+impl ResilientSource {
+    pub fn new(
+        first: Box<dyn RawSource>,
+        open: impl Fn() -> Result<Box<dyn RawSource>, String> + Send + 'static,
+        watch: TopologyWatch,
+    ) -> Self {
+        ResilientSource { inner: Some(first), open: Box::new(open), watch, failed: None, fails: 0, next_try: Instant::now() }
+    }
+}
+
+impl RawSource for ResilientSource {
+    fn next_raw(&mut self, timeout: Duration) -> Result<Option<RawFrame>, BoxError> {
+        let now = Instant::now();
+        if self.watch.changed(now) && self.inner.is_some() {
+            log::info!("The display layout changed; re-creating the capture");
+            self.inner = None;
+            self.next_try = now;
+        }
+        if let Some(why) = self.inner.as_ref().and_then(|s| s.failure()) {
+            log::info!("Capture ended ({why}); re-creating it");
+            self.inner = None;
+            self.next_try = now;
+        }
+        if self.inner.is_none() {
+            if now >= self.next_try && self.failed.is_none() {
+                match (self.open)() {
+                    Ok(s) => {
+                        log::info!("Capture re-created: {}", s.describe());
+                        self.inner = Some(s);
+                    }
+                    Err(e) => {
+                        self.fails += 1;
+                        self.next_try = now + REOPEN_GAP;
+                        log::debug!("Could not re-create the capture ({e}); attempt {}", self.fails);
+                        if self.fails >= MAX_REOPENS {
+                            self.failed = Some(format!("the monitor cannot be captured any more: {e}"));
+                        }
+                    }
+                }
+            }
+            if self.inner.is_none() {
+                std::thread::sleep(timeout.min(Duration::from_millis(50)));
+                return Ok(None);
+            }
+        }
+        let Some(inner) = self.inner.as_mut() else { return Ok(None) };
+        match inner.next_raw(timeout) {
+            Ok(frame) => {
+                if frame.is_some() {
+                    self.fails = 0;
+                }
+                Ok(frame)
+            }
+            Err(e) => {
+                log::info!("Capture failed ({e}); re-creating it");
+                self.inner = None;
+                self.next_try = now;
+                Ok(None)
+            }
+        }
+    }
+
+    fn describe(&self) -> String {
+        self.inner.as_ref().map_or_else(|| "monitor (re-creating the capture)".to_string(), |s| s.describe())
+    }
+
+    fn failure(&self) -> Option<String> {
+        self.failed.clone()
+    }
+
+    fn region(&self) -> Option<OutputRegion> {
+        self.inner.as_ref().and_then(|s| s.region())
     }
 }
 
@@ -85,6 +234,10 @@ pub struct VirtualMonitorSource {
     arriving: Option<std::sync::mpsc::Receiver<Result<Box<dyn VirtualMonitor>, String>>>,
     failed: Option<String>,
     label: String,
+    /// Set when this source goes away, so an add still in flight abandons its
+    /// work (or the monitor it finishes is given back at once).
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    watch: Option<TopologyWatch>,
     /// Rebuilds in a row that produced no frame.
     rebuilds: u32,
     next_try: Instant,
@@ -92,21 +245,25 @@ pub struct VirtualMonitorSource {
 
 /// Rebuilds of a dead capture before giving up (a monitor that stays gone).
 const MAX_REBUILDS: u32 = 20;
-const REBUILD_GAP: Duration = Duration::from_millis(500);
+const REBUILD_GAP: Duration = Duration::from_millis(250);
 
 impl VirtualMonitorSource {
     /// Starts `add` on its own thread; `open` builds the capture of the monitor
     /// once it is on the desktop (and again after a reload).
     pub fn start(
         label: String,
-        add: impl FnOnce() -> Result<Box<dyn VirtualMonitor>, String> + Send + 'static,
+        add: impl FnOnce(std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<Box<dyn VirtualMonitor>, String>
+            + Send
+            + 'static,
         open: impl Fn(&MonitorPlace) -> Result<Box<dyn RawSource>, String> + Send + 'static,
     ) -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancel_add = cancel.clone();
         let spawned = std::thread::Builder::new().name("displayswarm-virtual-add".into()).spawn(move || {
             // A receiver gone (the session ended first) drops the monitor here,
             // which gives it back.
-            let _ = tx.send(add());
+            let _ = tx.send(add(cancel_add));
         });
         let failed = spawned.err().map(|e| format!("could not start adding the virtual monitor: {e}"));
         VirtualMonitorSource {
@@ -116,9 +273,17 @@ impl VirtualMonitorSource {
             arriving: Some(rx),
             failed,
             label,
+            cancel,
+            watch: None,
             rebuilds: 0,
             next_try: Instant::now(),
         }
+    }
+
+    /// Rebuilds the capture when the display layout changes (read through `read`).
+    pub fn with_topology(mut self, read: Box<dyn Fn() -> u64 + Send>) -> Self {
+        self.watch = Some(TopologyWatch::new(read));
+        self
     }
 
     /// Takes the added monitor when it is ready; builds or rebuilds the capture.
@@ -146,6 +311,11 @@ impl VirtualMonitorSource {
             log::info!("Capture of the virtual monitor ended ({why}); looking for it again");
             self.inner = None;
         }
+        if self.inner.is_some() && self.watch.as_mut().is_some_and(|w| w.changed(Instant::now())) {
+            log::info!("The display layout changed; looking for the virtual monitor again");
+            self.inner = None;
+            self.next_try = Instant::now();
+        }
         let Some(monitor) = &self.monitor else { return };
         if self.inner.is_some() || Instant::now() < self.next_try {
             return;
@@ -166,6 +336,12 @@ impl VirtualMonitorSource {
             },
             None => log::debug!("Virtual monitor not on the desktop right now"),
         }
+    }
+}
+
+impl Drop for VirtualMonitorSource {
+    fn drop(&mut self) {
+        self.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -243,6 +419,8 @@ impl WindowsCapturer {
         out_h: u32,
         guard: Option<Box<dyn std::any::Any + Send>>,
     ) -> Self {
+        let mut source = source;
+        source.set_output_size(out_w.max(2), out_h.max(2));
         Self {
             source,
             out_w: out_w.max(2),
@@ -258,6 +436,9 @@ impl WindowsCapturer {
         if let Some(g) = raw.gpu {
             // Zero-copy: the encoder's video processor scales and converts it.
             return Frame { width: self.out_w, height: self.out_h, format: PixelFormat::Bgra, data: Vec::new(), timestamp_us: ts, gpu: Some(g) };
+        }
+        if raw.nv12 {
+            return Frame { width: raw.width, height: raw.height, format: PixelFormat::Nv12, data: raw.data, timestamp_us: ts, gpu: None };
         }
         if raw.width == self.out_w && raw.height == self.out_h {
             return Frame { width: raw.width, height: raw.height, format: PixelFormat::Bgra, data: raw.data, timestamp_us: ts, gpu: None };
@@ -479,14 +660,19 @@ impl WindowsCapturer {
                 Box::new(WgcSource::for_window(win)?)
             }
             CaptureTarget::Monitor { output } => {
-                let mon = sys::find_monitor(output.as_deref())?;
-                match WgcSource::for_monitor(&mon) {
-                    Ok(s) => Box::new(s),
-                    Err(e) => {
-                        log::warn!("Windows.Graphics.Capture unavailable for {} ({e}); using DXGI duplication", mon.name);
-                        Box::new(DxgiSource::new(&mon.name)?)
+                let output = output.clone();
+                let open = move || -> Result<Box<dyn RawSource>, String> {
+                    let mon = sys::find_monitor(output.as_deref())?;
+                    match WgcSource::for_monitor(&mon) {
+                        Ok(s) => Ok(Box::new(s) as Box<dyn RawSource>),
+                        Err(e) => {
+                            log::warn!("Windows.Graphics.Capture unavailable for {} ({e}); using DXGI duplication", mon.name);
+                            Ok(Box::new(DxgiSource::new(&mon.name)?) as Box<dyn RawSource>)
+                        }
                     }
-                }
+                };
+                let first = open()?;
+                Box::new(ResilientSource::new(first, open, TopologyWatch::new(Box::new(sys::topology))))
             }
             CaptureTarget::Virtual { width: vw, height: vh, refresh_mhz, .. } => {
                 let provider = crate::display::windows_caps::virtual_monitor_provider()?;
@@ -498,7 +684,7 @@ impl WindowsCapturer {
                 );
                 Box::new(VirtualMonitorSource::start(
                     label,
-                    move || provider.add(mode).map_err(|e| e.summary()),
+                    move |cancel| provider.add_cancellable(mode, &cancel).map_err(|e| e.summary()),
                     |place: &MonitorPlace| {
                         let mon = sys::monitor_named(&place.gdi_name)
                             .ok_or_else(|| format!("{} is not on the desktop", place.gdi_name))?;
@@ -510,7 +696,8 @@ impl WindowsCapturer {
                             }
                         }
                     },
-                ))
+                )
+                .with_topology(Box::new(sys::topology)))
             }
         };
         log::info!("Windows capture started: {}", source.describe());
@@ -577,6 +764,15 @@ pub mod sys {
             let _ = EnumDisplayMonitors(None, None, Some(cb), LPARAM(&mut out as *mut _ as isize));
         }
         out
+    }
+
+    /// Signature of the current monitor layout, for change detection.
+    pub fn topology() -> u64 {
+        let all: Vec<(String, i32, i32, i32, i32)> = monitors()
+            .into_iter()
+            .map(|m| (m.name, m.rect.left, m.rect.top, m.rect.right, m.rect.bottom))
+            .collect();
+        super::topology_signature(&all)
     }
 
     /// The monitor named exactly `name` (`\\.\DISPLAYn`), with no fallback.
@@ -843,7 +1039,7 @@ mod tests {
         let o = opened.clone();
         let src = VirtualMonitorSource::start(
             "fake".into(),
-            move || {
+            move |_| {
                 std::thread::sleep(Duration::from_millis(30));
                 Ok(Box::new(FakeMonitor { dropped: d }) as Box<dyn VirtualMonitor>)
             },
@@ -875,7 +1071,7 @@ mod tests {
     fn a_failed_add_is_a_failed_capture() {
         let mut src = VirtualMonitorSource::start(
             "fake".into(),
-            || Err("no driver".to_string()),
+            |_| Err("no driver".to_string()),
             |_: &MonitorPlace| Err("never".to_string()),
         );
         for _ in 0..100 {
@@ -896,7 +1092,7 @@ mod tests {
         let n = opens.clone();
         let mut src = VirtualMonitorSource::start(
             "fake".into(),
-            move || Ok(Box::new(FakeMonitor { dropped: d }) as Box<dyn VirtualMonitor>),
+            move |_| Ok(Box::new(FakeMonitor { dropped: d }) as Box<dyn VirtualMonitor>),
             move |_: &MonitorPlace| {
                 // The first capture dies (the monitor was re-created); the second works.
                 let first = n.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
@@ -910,6 +1106,134 @@ mod tests {
         assert_eq!(f.data[0], 9);
         assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert!(src.failure().is_none());
+    }
+
+    #[test]
+    fn dropping_the_source_cancels_an_add_still_in_flight() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let s2 = seen.clone();
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let src = VirtualMonitorSource::start(
+            "fake".into(),
+            move |cancel| {
+                rx.recv().ok();
+                *s2.lock().unwrap() = Some(cancel.load(std::sync::atomic::Ordering::SeqCst));
+                Err("cancelled".to_string())
+            },
+            |_: &MonitorPlace| Err("never".to_string()),
+        );
+        drop(src);
+        tx.send(()).unwrap();
+        for _ in 0..100 {
+            if seen.lock().unwrap().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(*seen.lock().unwrap(), Some(true));
+    }
+
+    fn watch_of(sig: &std::sync::Arc<std::sync::atomic::AtomicU64>) -> TopologyWatch {
+        let s = sig.clone();
+        TopologyWatch::new(Box::new(move || s.load(std::sync::atomic::Ordering::SeqCst)))
+    }
+
+    #[test]
+    fn a_layout_change_is_reported_once_after_it_settles() {
+        let sig = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let mut w = watch_of(&sig);
+        let t0 = Instant::now();
+        assert!(!w.changed(t0));
+        sig.store(2, std::sync::atomic::Ordering::SeqCst);
+        let t1 = t0 + Duration::from_millis(200);
+        assert!(!w.changed(t1), "just changed: still settling");
+        // Another change restarts the settle time.
+        sig.store(3, std::sync::atomic::Ordering::SeqCst);
+        assert!(!w.changed(t1 + Duration::from_millis(250)));
+        assert!(w.changed(t1 + Duration::from_millis(250) + TOPOLOGY_SETTLE));
+        assert!(!w.changed(t1 + Duration::from_secs(5)), "reported once");
+    }
+
+    #[test]
+    fn the_layout_signature_ignores_order_but_not_moves() {
+        let a = ("a".to_string(), 0, 0, 10, 10);
+        let b = ("b".to_string(), 10, 0, 20, 10);
+        assert_eq!(topology_signature(&[a.clone(), b.clone()]), topology_signature(&[b.clone(), a.clone()]));
+        assert_ne!(topology_signature(&[a.clone(), b.clone()]), topology_signature(&[a.clone()]));
+        let moved = ("b".to_string(), 11, 0, 21, 10);
+        assert_ne!(topology_signature(&[a.clone(), b]), topology_signature(&[a, moved]));
+    }
+
+    /// Opens fakes in turn; `ends` says how each one behaves.
+    fn resilient(
+        opens: std::sync::Arc<std::sync::atomic::AtomicU32>,
+        sig: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+        fail_opens: u32,
+    ) -> ResilientSource {
+        let n = opens.clone();
+        let open = move || -> Result<Box<dyn RawSource>, String> {
+            let k = n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if k >= 1 && k <= fail_opens {
+                return Err("monitor not there".into());
+            }
+            Ok(Box::new(Fake { frames: vec![Some(solid(4, 4, k as u8 + 1))].into(), failed: None }))
+        };
+        let first = open().unwrap();
+        ResilientSource::new(first, open, watch_of(sig))
+    }
+
+    #[test]
+    fn a_mirror_capture_is_recreated_after_a_layout_change() {
+        let opens = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let sig = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let mut src = resilient(opens.clone(), &sig, 0);
+        assert_eq!(src.next_raw(Duration::ZERO).unwrap().unwrap().data[0], 1);
+        // The first source is now silent (static screen) and the layout changes.
+        assert!(src.next_raw(Duration::ZERO).unwrap().is_none());
+        sig.store(2, std::sync::atomic::Ordering::SeqCst);
+        let mut got = None;
+        for _ in 0..60 {
+            if let Some(f) = src.next_raw(Duration::from_millis(5)).unwrap() {
+                got = Some(f);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(got.expect("a frame from the re-created capture").data[0], 2);
+        assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(src.failure().is_none());
+    }
+
+    #[test]
+    fn a_dead_or_failing_capture_is_recreated_and_missing_monitors_are_retried() {
+        let opens = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let sig = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let mut src = resilient(opens.clone(), &sig, 2);
+        src.inner = Some(Box::new(Fake { frames: VecDeque::new(), failed: Some("closed".into()) }));
+        let mut got = None;
+        for _ in 0..100 {
+            if let Some(f) = src.next_raw(Duration::from_millis(5)).unwrap() {
+                got = Some(f);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(got.is_some(), "recovered after two failed attempts");
+        assert_eq!(opens.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert!(src.failure().is_none());
+    }
+
+    #[test]
+    fn a_monitor_that_never_comes_back_fails_the_source() {
+        let opens = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let sig = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let mut src = resilient(opens, &sig, u32::MAX);
+        src.inner = None;
+        for _ in 0..(MAX_REOPENS as usize + 5) {
+            src.next_try = Instant::now();
+            let _ = src.next_raw(Duration::ZERO);
+        }
+        assert!(src.failure().unwrap().contains("cannot be captured"));
     }
 
     fn win(hwnd: isize, title: &str, pid: u32) -> WindowInfo {

@@ -55,7 +55,8 @@ pub(crate) fn check_frame(frame: &Frame, width: u32, height: u32) -> Result<(), 
         )
         .into());
     }
-    if frame.data.len() < (width as usize) * (height as usize) * 4 {
+    let need = if frame.format == crate::capture::PixelFormat::Nv12 { (width as usize) * (height as usize) * 3 / 2 } else { (width as usize) * (height as usize) * 4 };
+    if frame.data.len() < need {
         return Err(format!("frame buffer too small: {} bytes", frame.data.len()).into());
     }
     Ok(())

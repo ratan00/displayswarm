@@ -49,6 +49,15 @@ pub fn to_nv12(
     if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
         return Err(format!("invalid NV12 dimensions {}x{}", width, height));
     }
+    if format == PixelFormat::Nv12 {
+        // Converted already (by the GPU): just the copy into the encoder's buffer.
+        let n = nv12_len(width, height);
+        if src.len() < n || nv12_out.len() < n {
+            return Err(format!("NV12 buffer too small for {width}x{height}"));
+        }
+        nv12_out[..n].copy_from_slice(&src[..n]);
+        return Ok(());
+    }
     if src.len() < width * height * 4 {
         return Err(format!(
             "source too small: {} bytes for {}x{} (need {})",
@@ -79,6 +88,7 @@ pub fn to_nv12(
         PixelFormat::Bgra => {
             bgra_to_yuv_nv12(&mut image, src, stride, RANGE, MATRIX, YuvConversionMode::Balanced)
         }
+        PixelFormat::Nv12 => unreachable!("copied above"),
     };
     result.map_err(|e| format!("yuv conversion failed: {:?}", e))
 }

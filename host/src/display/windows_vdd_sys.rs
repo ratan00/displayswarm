@@ -37,8 +37,11 @@ use windows::Win32::System::Pipes::WaitNamedPipeW;
 use windows::Win32::System::Registry::{RegCloseKey, RegGetValueW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_REG_SZ};
 
 /// How long to wait for the driver's answer. A `SETDISPLAYCOUNT` reload can
-/// take a while; the driver's own control app allows 45 s.
-const PIPE_ANSWER_TIMEOUT: Duration = Duration::from_secs(45);
+/// take a while (the driver's own control app allows 45 s), but the command is
+/// already delivered once written: after this grace the caller goes on
+/// (waiting for the device to run and the monitor to appear) while the reply
+/// thread drains the pipe, instead of idling until the driver hangs up.
+const PIPE_ANSWER_TIMEOUT: Duration = Duration::from_millis(1500);
 const PIPE_CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 /// `ERROR_PIPE_BUSY`: every instance of the pipe is in use; try again.
 const ERROR_PIPE_BUSY: i32 = 231;
@@ -297,7 +300,7 @@ impl VddSystem for WinVdd {
         match rx.recv_timeout(PIPE_ANSWER_TIMEOUT) {
             Ok(bytes) => PipeResult::Sent(decode_reply(&bytes)),
             Err(_) => {
-                log::warn!("The Virtual Display Driver did not finish answering {command:?} within {PIPE_ANSWER_TIMEOUT:?}");
+                log::debug!("The Virtual Display Driver is still reloading after {command:?}; not waiting for its reply");
                 PipeResult::Sent(String::new())
             }
         }

@@ -167,6 +167,50 @@ pub fn adapter_for_output(name: &str) -> Option<IDXGIAdapter> {
     find_output(name).ok().and_then(|(a, ..)| a.cast::<IDXGIAdapter>().ok())
 }
 
+/// Which adapter the capture device should be created on, and why: the
+/// `DISPLAYSWARM_CAPTURE_ADAPTER` override (a vendor id such as `0x8086`, or a
+/// part of the adapter's name), else the encoder's GPU (WGC captures across
+/// adapters by itself, and the encoder needs the texture on its own GPU), else
+/// the GPU that drives the output, else the default.
+pub fn pick_adapter(output_name: Option<&str>) -> (Option<IDXGIAdapter>, String) {
+    let Ok(factory) = unsafe { CreateDXGIFactory1() }.map(|f: IDXGIFactory1| f) else {
+        return (None, "default adapter (no DXGI factory)".into());
+    };
+    let find = |pred: &dyn Fn(u32, &str) -> bool| -> Option<IDXGIAdapter> {
+        let mut i = 0;
+        while let Ok(a) = unsafe { factory.EnumAdapters1(i) } {
+            i += 1;
+            let Ok(d) = (unsafe { a.GetDesc1() }) else { continue };
+            if d.Flags & 2 != 0 {
+                continue; // DXGI_ADAPTER_FLAG_SOFTWARE
+            }
+            let end = d.Description.iter().position(|&c| c == 0).unwrap_or(d.Description.len());
+            if pred(d.VendorId, &String::from_utf16_lossy(&d.Description[..end])) {
+                return a.cast().ok();
+            }
+        }
+        None
+    };
+    if let Ok(want) = std::env::var("DISPLAYSWARM_CAPTURE_ADAPTER") {
+        let w = want.trim().to_ascii_lowercase();
+        let vendor = w.strip_prefix("0x").and_then(|h| u32::from_str_radix(h, 16).ok());
+        if let Some(a) = find(&|v, n| vendor == Some(v) || (vendor.is_none() && !w.is_empty() && n.to_ascii_lowercase().contains(&w))) {
+            return (Some(a), format!("DISPLAYSWARM_CAPTURE_ADAPTER={want}"));
+        }
+        log::warn!("DISPLAYSWARM_CAPTURE_ADAPTER={want} matches no adapter");
+    }
+    let vendor = crate::capture::encoder_vendor();
+    if vendor != 0 {
+        if let Some(a) = find(&|v, _| v == vendor) {
+            return (Some(a), format!("the encoder runs on vendor {vendor:#x}"));
+        }
+    }
+    if let Some(a) = output_name.and_then(adapter_for_output) {
+        return (Some(a), "it drives the captured output".into());
+    }
+    (None, "default adapter".into())
+}
+
 impl DxgiSource {
     pub fn new(output_name: &str) -> Result<Self, String> {
         let (adapter, output, region, rotation) = find_output(output_name)?;

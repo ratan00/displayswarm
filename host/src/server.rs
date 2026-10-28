@@ -1818,7 +1818,10 @@ fn capture_loop(
         match result {
             Ok(Some(frame)) => {
                 slot.put(frame);
-                next_allowed = Instant::now() + interval;
+                // Paced from the previous slot, not from when the (slow) capture call
+                // returned: a capture that itself takes 20 ms must not add the interval on top.
+                let done = Instant::now();
+                next_allowed = (next_allowed + interval).max(done.checked_sub(interval).unwrap_or(done));
             }
             Ok(None) => {} // nothing new: nothing to encode
             Err(e) => {
@@ -2578,7 +2581,7 @@ where
                     Some(claim) => {
                         let attempt = tokio::task::spawn_blocking(move || (manager.backends.primary)(region, panel_off));
                         match tokio::time::timeout(PRIMARY_TIMEOUT, attempt).await {
-                            Ok(Ok(Ok((guard, actual)))) => Ok((PrimaryHold { guard, _claim: claim }, actual)),
+                            Ok(Ok(Ok((guard, actual)))) => Ok((PrimaryHold { _guard: guard, _claim: claim }, actual)),
                             Ok(Ok(Err(e))) => Err(e),
                             Ok(Err(e)) => Err(format!("internal error: {e}")),
                             Err(_) => Err("timed out".to_string()),
@@ -2834,7 +2837,7 @@ struct Pipeline {
 /// The primary-display guard plus this device's claim on the single primary
 /// slot. Field order matters: the layout is restored, then the slot freed.
 struct PrimaryHold {
-    guard: Box<dyn std::any::Any + Send>,
+    _guard: Box<dyn std::any::Any + Send>,
     _claim: PrimaryClaim,
 }
 
@@ -2892,9 +2895,10 @@ fn start_pipeline(
     } else {
         None
     };
+    // The encoder first: the Windows capture creates its device on the encoder's GPU.
+    let encoder = (backends.encoder)(w, h, env.fps, env.bitrate_kbps, env.qp);
     let capturer = (backends.capture)(&target, Some(&key), w, h);
     log::info!("Role {}: capture source {} ({:?})", role.label(), capturer.describe_source(), target);
-    let encoder = (backends.encoder)(w, h, env.fps, env.bitrate_kbps, env.qp);
 
     let encoder_name = encoder.backend_name();
     let capture_state = Arc::new(Mutex::new(capturer.state()));

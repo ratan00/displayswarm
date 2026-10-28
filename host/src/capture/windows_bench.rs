@@ -137,7 +137,8 @@ fn run(label: &str, gpu: bool, secs: u64, w: u32, h: u32, fps: u32) {
                     stats.captured.fetch_add(1, Ordering::Relaxed);
                     *slot.0.lock().unwrap() = Some(f);
                     slot.1.notify_one();
-                    next_allowed = Instant::now() + interval;
+                    let done = Instant::now();
+                    next_allowed = (next_allowed + interval).max(done.checked_sub(interval).unwrap_or(done));
                 }
             }
         })

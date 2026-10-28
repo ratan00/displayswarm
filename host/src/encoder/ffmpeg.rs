@@ -527,6 +527,7 @@ impl FfmpegEncoder {
                         }
                         #[cfg(target_os = "windows")]
                         if codec == "h264_qsv" {
+                            crate::capture::set_encoder_vendor(0x8086);
                             let wanted = std::env::var("DISPLAYSWARM_ZEROCOPY").map(|v| v == "1").unwrap_or(false);
                             crate::capture::set_gpu_frames(wanted);
                             log::info!("{codec}: zero-copy capture {}", if wanted { "on (checked on the first frame)" } else { "off (set DISPLAYSWARM_ZEROCOPY=1 to try it)" });
