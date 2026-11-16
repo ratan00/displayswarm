@@ -469,6 +469,14 @@ async fn connection_loop(weak: Weak<MainWindow>, transport: Arc<dyn IpcTransport
                                 post(&weak, UiMsg::Wifi(data));
                             }
                         }
+                        Event::FileTransfer { name, ok, detail, path, .. } => {
+                            let text = match (ok, path) {
+                                (true, Some(p)) => format!("Received {name} \u{2192} {p}"),
+                                (true, None) => format!("Sent {name}"),
+                                (false, _) => format!("{name}: {detail}"),
+                            };
+                            post(&weak, UiMsg::Note(text));
+                        }
                         Event::Shutdown => {}
                         Event::DeviceConnected { .. } | Event::DeviceDisconnected { .. } | Event::NeedsRole { .. } => {}
                     }
@@ -638,6 +646,25 @@ fn wire_callbacks(ui: &MainWindow) {
     ui.on_identify_device({
         let weak = weak.clone();
         move |id| send(&weak, Request::Identify { device_id: id.to_string() })
+    });
+    ui.on_send_file_to({
+        let weak = weak.clone();
+        move |id| {
+            let weak = weak.clone();
+            let device_id = id.to_string();
+            // The dialog blocks: run it off the UI thread.
+            std::thread::spawn(move || match displayswarm_host::file_dialog::choose_files("Send to the phone") {
+                Ok(paths) if paths.is_empty() => {}
+                Ok(paths) => {
+                    let n = paths.len();
+                    let paths = paths.iter().map(|p| p.display().to_string()).collect();
+                    call(&weak, Request::SendFiles { device_id, paths }, move |_| {
+                        Some(UiMsg::Note(format!("Sending {n} file(s)\u{2026}")))
+                    });
+                }
+                Err(e) => post(&weak, UiMsg::Note(e)),
+            });
+        }
     });
     ui.on_toggle_server({
         let weak = weak.clone();

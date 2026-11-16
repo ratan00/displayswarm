@@ -215,6 +215,9 @@ object Wire {
     const val FILE_REJECT = 1
     const val FILE_CANCEL = 2
     const val FILE_COMPLETE = 3
+    /** Receiver -> sender: another [FILE_ACK_EVERY] chunks were written (flow control). */
+    const val FILE_ACK = 4
+    const val FILE_ACK_EVERY = 8
 
     data class Hello(
         val width: Int,

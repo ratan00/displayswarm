@@ -51,6 +51,25 @@
                 android:resource="@xml/accessory_filter" />
         </activity>
 
+        <!-- Share > DisplaySwarm: send files to the connected PC. -->
+        <activity
+            android:name=".ShareToPcActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:label="Send to PC"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+
         <service
             android:name=".SessionService"
             android:exported="false"

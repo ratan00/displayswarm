@@ -85,7 +85,7 @@ class MainActivity : AppCompatActivity(), SurfaceHolder.Callback, ClientActions 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         // Session services (audio, clipboard, files, ...): see PhoneServices.
-        PhoneServices.install(this, listOf(AudioPlayer(this), MicCapture(this), ClipboardSync(), BatteryReporter()))
+        PhoneServices.install(this, listOf(AudioPlayer(this), MicCapture(this), ClipboardSync(), BatteryReporter(), FileTransfer(this)))
         settings = AppSettings.from(this)
         ui = ClientUiState(settings)
         ControlSession.preferredQuality = settings.videoQuality

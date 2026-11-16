@@ -159,6 +159,26 @@ impl DaemonCore {
                 PairEvent::Failed { device_id, reason } => Event::PairingFailed { device_id, reason },
             });
         });
+        let weak = Arc::downgrade(self);
+        crate::services::files::set_listener(move |ev| {
+            let Some(core) = weak.upgrade() else { return };
+            use crate::services::files::FileEvent;
+            core.emit(match ev {
+                FileEvent::Received { device_id, name, path } => Event::FileTransfer {
+                    device_id,
+                    name,
+                    ok: true,
+                    detail: "received".into(),
+                    path: Some(path.display().to_string()),
+                },
+                FileEvent::Sent { device_id, name } => {
+                    Event::FileTransfer { device_id, name, ok: true, detail: "sent".into(), path: None }
+                }
+                FileEvent::Failed { device_id, name, reason } => {
+                    Event::FileTransfer { device_id, name, ok: false, detail: reason, path: None }
+                }
+            });
+        });
         let core = self.clone();
         tokio::task::spawn_blocking(move || {
             *lock(&core.start_on_login) = super::autostart::is_enabled();
@@ -385,6 +405,15 @@ impl DaemonCore {
                 self.require_device(&device_id)?;
                 let output = output.filter(|o| !o.trim().is_empty());
                 self.manager.set_target_output(&device_id, output);
+                Ok(Response::Ok)
+            }
+            Request::SendFiles { device_id, paths } => {
+                if paths.is_empty() {
+                    return Err("no files given".into());
+                }
+                for p in &paths {
+                    self.manager.send_file(&device_id, std::path::Path::new(p))?;
+                }
                 Ok(Response::Ok)
             }
             Request::Disconnect { device_id } => {

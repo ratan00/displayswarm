@@ -81,6 +81,8 @@ pub enum Request {
     SetTargetOutput { device_id: String, output: Option<String> },
     /// Ends the device's session but keeps its record.
     Disconnect { device_id: String },
+    /// Send these files to a connected device.
+    SendFiles { device_id: String, paths: Vec<String> },
     /// Ends the session and deletes the record.
     ForgetDevice { device_id: String },
     /// "Which device is this?": broadcasts [`Event::Identify`] to every
@@ -139,6 +141,8 @@ pub enum Event {
     PairingPin { device_id: String, name: String, pin: String, valid_secs: u64 },
     Paired { device_id: String, name: String },
     PairingFailed { device_id: String, reason: String },
+    /// A file transfer finished or failed. `path` is where a received file was saved.
+    FileTransfer { device_id: String, name: String, ok: bool, detail: String, path: Option<String> },
     /// The daemon is exiting.
     Shutdown,
 }

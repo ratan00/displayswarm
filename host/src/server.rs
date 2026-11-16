@@ -172,6 +172,8 @@ enum SessionCmd {
     Resize { width: u16, height: u16 },
     /// The host UI changed the device's settings.
     Settings(DeviceSettings),
+    /// The host user sends a file to the phone.
+    SendFile(std::path::PathBuf),
     /// End the session.
     End(EndKind, String),
 }
@@ -515,6 +517,17 @@ impl SessionManager {
             let _ = tx.send(SessionCmd::Settings(settings.clone()));
         }
         self.edit_record(device_id, |r| r.settings = settings);
+    }
+
+    /// Sends a file to a connected device. `Err` when it is not connected or
+    /// the file cannot be read.
+    pub fn send_file(&self, device_id: &str, path: &std::path::Path) -> Result<(), String> {
+        let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if !meta.is_file() {
+            return Err(format!("{} is not a file", path.display()));
+        }
+        let tx = self.lock_sessions().get(device_id).map(|e| e.cmd_tx.clone()).ok_or("That device is not connected")?;
+        tx.send(SessionCmd::SendFile(path.to_path_buf())).map_err(|_| "That device just disconnected".to_string())
     }
 
     /// Sets the picture-quality mode (the phone's choice).
@@ -1516,6 +1529,7 @@ enum ServiceEvent {
     Message(Message),
     Role(Role),
     Settings(DeviceSettings),
+    SendFile(std::path::PathBuf),
 }
 
 /// Runs the session's services until `rx` closes, then drops them (their
@@ -1539,6 +1553,11 @@ async fn services_task(
             }
             ServiceEvent::Role(r) => services.iter_mut().for_each(|s| s.on_role(r)),
             ServiceEvent::Settings(st) => services.iter_mut().for_each(|s| s.on_settings(&st)),
+            ServiceEvent::SendFile(path) => {
+                if !services.iter_mut().any(|s| s.send_file(&path)) {
+                    log::warn!("Cannot send {}: this device did not offer file transfer", path.display());
+                }
+            }
         }
     }
     let _ = tokio::task::spawn_blocking(move || drop(services)).await;
@@ -2540,6 +2559,9 @@ where
                     },
                     SessionCmd::Settings(s) => {
                         let _ = svc_tx.send(ServiceEvent::Settings(s));
+                    }
+                    SessionCmd::SendFile(path) => {
+                        let _ = svc_tx.send(ServiceEvent::SendFile(path));
                     }
                     SessionCmd::PhoneSetRole(v) => match Role::from_wire(v) {
                         Some(role) => {

@@ -4,6 +4,7 @@ pub mod daemon;
 pub mod devices;
 pub mod display;
 pub mod encoder;
+pub mod file_dialog;
 pub mod input;
 pub mod ipc;
 pub mod protocol;

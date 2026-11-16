@@ -28,12 +28,13 @@ use tokio::sync::mpsc;
 pub mod battery;
 pub mod clipboard;
 pub mod clipboard_windows;
+pub mod files;
 #[cfg(target_os = "linux")]
 pub mod clipboard_x11;
 
 use crate::devices::{DeviceSettings, Role};
 use crate::protocol::wire::{
-    Message, FEATURE_AUDIO_OUT, FEATURE_BATTERY, FEATURE_CLIPBOARD, FEATURE_KEYBOARD, FEATURE_MIC,
+    Message, FEATURE_AUDIO_OUT, FEATURE_BATTERY, FEATURE_CLIPBOARD, FEATURE_FILES, FEATURE_KEYBOARD, FEATURE_MIC,
     FEATURE_STYLUS, FEATURE_TOUCH,
 };
 
@@ -45,6 +46,7 @@ pub const HOST_FEATURES: u32 = FEATURE_TOUCH
     | FEATURE_AUDIO_OUT
     | FEATURE_MIC
     | FEATURE_CLIPBOARD
+    | FEATURE_FILES
     | FEATURE_BATTERY;
 
 /// The `FEATURE_*` bits a session gets: what the phone offered, what this host
@@ -154,6 +156,11 @@ pub trait SessionService: Send {
     fn on_role(&mut self, _role: Role) {}
     /// The device's settings changed while the session runs.
     fn on_settings(&mut self, _settings: &DeviceSettings) {}
+    /// The host user asked to send `path` to the phone. True if this service
+    /// took it.
+    fn send_file(&mut self, _path: &std::path::Path) -> bool {
+        false
+    }
 }
 
 pub type ServiceFactory = dyn Fn(&ServiceCtx) -> Vec<Box<dyn SessionService>> + Send + Sync;
@@ -164,6 +171,9 @@ pub fn default_services(ctx: &ServiceCtx) -> Vec<Box<dyn SessionService>> {
     v.extend(crate::audio::audio_services(ctx));
     if ctx.settings.clipboard && ctx.features & FEATURE_CLIPBOARD != 0 {
         v.push(Box::new(clipboard::ClipboardService::start(ctx)));
+    }
+    if ctx.features & FEATURE_FILES != 0 {
+        v.push(Box::new(files::FileService::start(ctx)));
     }
     if ctx.features & FEATURE_BATTERY != 0 {
         v.push(Box::new(battery::BatteryService::new(ctx)));

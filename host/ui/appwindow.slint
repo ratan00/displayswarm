@@ -426,6 +426,7 @@ component DeviceDetail inherits VerticalLayout {
     callback disconnect();
     callback forget();
     callback identify();
+    callback send-file();
 
     property <[string]> blurbs: [
         "Show the laptop screen",
@@ -606,6 +607,7 @@ component DeviceDetail inherits VerticalLayout {
         spacing: 8px;
         Button { text: "Identify"; clicked => { root.identify(); } }
         Button { text: "Disconnect"; enabled: root.dev.connected; clicked => { root.disconnect(); } }
+        Button { text: "Send file\u{2026}"; enabled: root.dev.connected; clicked => { root.send-file(); } }
         Rectangle { horizontal-stretch: 1; }
         Button { text: "Forget device"; clicked => { root.forget(); } }
     }
@@ -701,6 +703,7 @@ export component MainWindow inherits Window {
     callback disconnect-device(string);
     callback forget-device(string);
     callback identify-device(string);
+    callback send-file-to(string);
     callback toggle-server();
     callback apply-settings();
     callback sync-audio-now();
@@ -897,6 +900,7 @@ export component MainWindow inherits Window {
                                 disconnect => { root.disconnect-device(dev.id); }
                                 forget => { root.forget-device(dev.id); }
                                 identify => { root.identify-device(dev.id); }
+                                send-file => { root.send-file-to(dev.id); }
                             }
                         }
                     }
@@ -939,6 +943,7 @@ export component MainWindow inherits Window {
                                 disconnect => { root.disconnect-device(dev.id); }
                                 forget => { root.forget-device(dev.id); }
                                 identify => { root.identify-device(dev.id); }
+                                send-file => { root.send-file-to(dev.id); }
                             }
                         }
                     }

@@ -113,6 +113,20 @@ pub fn notice_for(event: &Event, tray_present: bool) -> Option<Notice> {
             body: "It can now connect over Wi-Fi.".into(),
             actions: Vec::new(),
         }),
+        Event::FileTransfer { device_id, name, ok, detail, path } => Some(Notice {
+            device_id: format!("file:{device_id}"),
+            summary: match (ok, detail.as_str()) {
+                (true, "received") => format!("Received {name}"),
+                (true, _) => format!("Sent {name}"),
+                (false, _) => format!("{name} was not transferred"),
+            },
+            body: match (ok, path) {
+                (true, Some(p)) => format!("Saved to {p}"),
+                (true, None) => String::new(),
+                (false, _) => detail.clone(),
+            },
+            actions: Vec::new(),
+        }),
         Event::PairingFailed { device_id, reason } => Some(Notice {
             device_id: format!("pair:{device_id}"),
             summary: "Pairing failed".into(),

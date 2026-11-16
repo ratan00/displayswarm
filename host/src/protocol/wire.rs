@@ -281,6 +281,10 @@ pub const FILE_ACCEPT: u8 = 0;
 pub const FILE_REJECT: u8 = 1;
 pub const FILE_CANCEL: u8 = 2;
 pub const FILE_COMPLETE: u8 = 3;
+/// Receiver -> sender: another [`FILE_ACK_EVERY`] chunks were written (flow control).
+pub const FILE_ACK: u8 = 4;
+/// Chunks between two `FILE_ACK`s.
+pub const FILE_ACK_EVERY: u32 = 8;
 
 // ---- Message structs -------------------------------------------------------------
 
