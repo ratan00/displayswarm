@@ -184,6 +184,7 @@ pub mod env;
 pub mod model;
 pub mod reconcile;
 pub mod virtual_monitor;
+pub mod windows_layout;
 #[cfg(windows)]
 pub mod windows_caps;
 // Plain logic plus a fake; the Win32 side is `windows_vdd_sys`.

@@ -1,8 +1,7 @@
 //! Picks the [`LayoutBackend`] for this session: any X11 session through
 //! RandR ([`super::randr`]), KDE Plasma through [`super::kscreen`]
-//! (`kscreen-doctor`), GNOME through [`super::mutter`] (D-Bus), and
-//! [`NoLayout`] everywhere else, including every non-Linux
-//! platform. The rest of the host asks the backend (or
+//! (`kscreen-doctor`), GNOME through [`super::mutter`] (D-Bus), Windows
+//! through [`super::windows_layout`], and [`NoLayout`] everywhere else. The rest of the host asks the backend (or
 //! [`Capabilities`](super::model::Capabilities)) and never the desktop's name.
 
 use super::backend::LayoutBackend;
@@ -14,7 +13,11 @@ pub fn current() -> Arc<dyn LayoutBackend> {
     {
         current_linux()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    {
+        Arc::new(super::windows_layout::WindowsLayout)
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
     {
         Arc::new(super::backend::NoLayout)
     }

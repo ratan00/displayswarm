@@ -2,8 +2,8 @@
 //! inject and whether a display driver can add a monitor for the phone, and
 //! lets [`crate::capture::windows_probe`] decide what that means for the roles.
 //! With the Virtual Display Driver installed that is Mirror, window and Extend;
-//! without it Extend is refused with what to install. There is no layout
-//! backend yet, so Phone-primary is refused either way.
+//! without it Extend is refused with what to install. Phone-primary follows
+//! Extend (the layout backend is `windows_layout`).
 
 use super::model::Capabilities;
 use super::virtual_monitor::{select, OwnIddPlaceholder, ProviderKind, VirtualMonitorProvider};

@@ -131,7 +131,16 @@ impl Default for Backends {
                         })
                         .map_err(|e| e.to_string())
                 }
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(windows)]
+                {
+                    crate::display::windows_layout::make_primary(region, panel_off)
+                        .map(|g| {
+                            let moved = g.region();
+                            (Box::new(g) as Box<dyn std::any::Any + Send>, moved)
+                        })
+                        .map_err(|e| e.summary())
+                }
+                #[cfg(not(any(target_os = "linux", windows)))]
                 {
                     let _ = (region, panel_off);
                     Err("making a monitor the primary screen is not supported on this platform".to_string())

@@ -31,9 +31,10 @@ pub struct Probe {
 }
 
 /// The capabilities for `p`. A virtual monitor needs a display driver
-/// (`p.virtual_monitor`) and something to capture it with; there is no layout
-/// backend yet, so every layout bit stays false and Phone-primary is refused
-/// with the usual reason.
+/// (`p.virtual_monitor`) and something to capture it with. The layout is
+/// read and its primary set through `ChangeDisplaySettingsExW`
+/// ([`crate::display::windows_layout`]), so Phone-primary works wherever
+/// Extend does.
 pub fn capabilities(p: &Probe) -> Capabilities {
     let has_screen = p.interactive_session && p.monitors > 0;
     let wgc = has_screen && p.wgc_supported && p.build >= WGC_MIN_BUILD;
@@ -53,7 +54,7 @@ pub fn capabilities(p: &Probe) -> Capabilities {
         desktop: Desktop::Windows,
         session: SessionType::Windows,
         capture,
-        layout: LayoutCaps::NONE,
+        layout: if has_screen { crate::display::windows_layout::CAPS } else { LayoutCaps::NONE },
         input_ok: p.interactive_session && p.build >= POINTER_INJECTION_MIN_BUILD,
         rung: if capture.virtual_ { Rung::Driver } else { Capabilities::rung_for(&capture) },
         virtual_reason,
@@ -81,7 +82,7 @@ mod tests {
         let c = capabilities(&win11());
         assert_eq!((c.desktop, c.session), (Desktop::Windows, SessionType::Windows));
         assert!(c.capture.monitor && c.capture.window && !c.capture.virtual_);
-        assert_eq!(c.layout, LayoutCaps::NONE);
+        assert!(c.layout.query && c.layout.primary);
         assert!(c.input_ok);
         assert_eq!(c.rung, Rung::MirrorOnly);
         assert!(c.role_support(Role::Mirror).is_yes());
@@ -90,17 +91,16 @@ mod tests {
         let extend = c.role_support(Role::Extend);
         assert!(!extend.is_yes(), "no virtual display driver installed");
         assert!(extend.reason().unwrap().contains("Virtual Display Driver"), "{extend:?}");
-        assert!(!c.role_support(Role::PhonePrimary).is_yes());
+        assert!(!c.role_support(Role::PhonePrimary).is_yes(), "needs the virtual monitor too");
     }
 
     #[test]
-    fn with_a_usable_driver_extend_works_but_phone_primary_still_needs_a_layout_backend() {
+    fn with_a_usable_driver_extend_and_phone_primary_work() {
         let c = capabilities(&Probe { virtual_monitor: Ok(()), ..win11() });
         assert!(c.capture.virtual_);
         assert_eq!(c.rung, Rung::Driver);
         assert!(c.role_support(Role::Extend).is_yes());
-        let primary = c.role_support(Role::PhonePrimary);
-        assert!(primary.reason().unwrap().contains("layout"), "{primary:?}");
+        assert!(c.role_support(Role::PhonePrimary).is_yes());
     }
 
     #[test]
