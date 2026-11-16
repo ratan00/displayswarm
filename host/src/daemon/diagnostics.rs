@@ -64,7 +64,7 @@ pub fn run(encoder: Option<&str>, tray_mode: &str) -> Vec<DiagItem> {
     });
 
     let unit = super::autostart::unit_installed();
-    out.push(item(
+    if !cfg!(windows) { out.push(item(
         "systemd user service",
         if unit { DiagStatus::Ok } else { DiagStatus::Warn },
         if unit {
@@ -72,7 +72,7 @@ pub fn run(encoder: Option<&str>, tray_mode: &str) -> Vec<DiagItem> {
         } else {
             format!("{} not installed (run host/dist/install.sh)", super::autostart::UNIT)
         },
-    ));
+    )); }
     out.push(match crate::devices::DeviceStore::default_path() {
         Some(p) => item("Device store", DiagStatus::Ok, p.display().to_string()),
         None => item("Device store", DiagStatus::Warn, "no config directory; roles are not remembered"),

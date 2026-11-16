@@ -63,7 +63,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 // `KEYEVENTF_EXTENDEDKEY` is required for the keys the PC marks with the E0
 // prefix, and omitting it makes the wrong key appear: the arrows become the
 // numpad, Insert becomes the keypad's 0, and Delete becomes the keypad's
-// decimal point. The list is in `is_extended_scan_code`.
+// decimal point. The list is in `windows_map::is_extended_android_key`.
 
 /// Android `KeyEvent.KEYCODE_*` -> a Windows virtual key.
 ///
@@ -166,32 +166,12 @@ fn android_keycode_to_vk(key_code: u16) -> Option<VIRTUAL_KEY> {
         86 => VIRTUAL_KEY(0xAA), // KEYCODE_MEDIA_REWIND
         87 => VIRTUAL_KEY(0xA9), // KEYCODE_MEDIA_FAST_FORWARD
         26 => VIRTUAL_KEY(0x5E), // KEYCODE_POWER
+        116 => VK_SCROLL,      // KEYCODE_SCROLL_LOCK
+        120 => VK_SNAPSHOT,    // KEYCODE_SYSRQ (Print Screen)
+        121 => VK_PAUSE,       // KEYCODE_BREAK
 
         _ => return None,
     })
-}
-
-/// Virtual keys whose PC scan code is E0-prefixed and therefore need
-/// `KEYEVENTF_EXTENDEDKEY`.
-///
-/// Getting this list wrong is silent and confusing: without the flag Windows
-/// resolves the scan code against the *main* block, so the arrow keys move the
-/// numpad and Insert/Delete/Home/End/PageUp/PageDown become keypad digits.
-#[cfg(target_os = "windows")]
-fn is_extended_scan_code(vk: VIRTUAL_KEY) -> bool {
-    matches!(
-        vk,
-        // Arrows.
-        VK_UP | VK_DOWN | VK_LEFT | VK_RIGHT |
-        // Navigation block.
-        VK_INSERT | VK_DELETE | VK_HOME | VK_END | VK_PRIOR | VK_NEXT |
-        // Right-hand modifiers, which are E0 on a PC keyboard.
-        VK_RCONTROL | VK_RMENU |
-        // Keypad operators and Enter.
-        VK_DIVIDE | VK_RETURN |
-        // Application / browser keys.
-        VK_APPS | VK_BROWSER_BACK | VK_BROWSER_FORWARD | VK_BROWSER_HOME | VK_BROWSER_SEARCH
-    )
 }
 
 /// Injects one keyboard event by scan code.
@@ -210,13 +190,13 @@ fn is_extended_scan_code(vk: VIRTUAL_KEY) -> bool {
 /// locked), and a return value *below* the number of events sent means it was
 /// partially blocked, which for a one-event call is the same thing.
 #[cfg(target_os = "windows")]
-fn send_scan_code(vk: VIRTUAL_KEY, key_up: bool) -> bool {
+fn send_scan_code(vk: VIRTUAL_KEY, extended: bool, key_up: bool) -> bool {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
     };
 
     let mut flags = KEYEVENTF_SCANCODE;
-    if is_extended_scan_code(vk) {
+    if extended {
         flags |= KEYEVENTF_EXTENDEDKEY;
     }
     if key_up {
@@ -277,6 +257,31 @@ fn send_virtual_key(vk: VIRTUAL_KEY, key_up: bool) -> bool {
         },
     };
     unsafe { SendInput(&[input], std::mem::size_of::<INPUT>() as i32) == 1 }
+}
+
+/// Types `text` as Unicode characters (`KEYEVENTF_UNICODE`, which Windows
+/// delivers as `VK_PACKET` and then `WM_CHAR`), independent of any keyboard
+/// layout. This is how text the phone's keyboard commits arrives: it has no key
+/// code, so the scan-code path cannot carry it. Characters outside the Basic
+/// Multilingual Plane go as their two UTF-16 surrogates, in order.
+#[cfg(target_os = "windows")]
+fn send_unicode(text: &str, key_up: bool) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT_0, INPUT_KEYBOARD, KEYBDINPUT};
+    let flags = if key_up { KEYEVENTF_UNICODE | KEYEVENTF_KEYUP } else { KEYEVENTF_UNICODE };
+    let inputs: Vec<INPUT> = map::utf16_units(text)
+        .into_iter()
+        .map(|unit| INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT { wVk: VIRTUAL_KEY(0), wScan: unit, dwFlags: flags, time: 0, dwExtraInfo: 0 },
+            },
+        })
+        .collect();
+    if inputs.is_empty() {
+        return true;
+    }
+    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    sent as usize == inputs.len()
 }
 
 /// The virtual key each `KEY_FLAG_*` modifier bit is injected as, or `None` if
@@ -490,17 +495,26 @@ impl InputInjector for WindowsPointerInjector {
         {
             let modifier_bits = event.flags & MODIFIER_BITS;
 
-            let Some(vk) = android_keycode_to_vk(event.key_code) else {
-                log::debug!("Android keycode {} is not mapped to a Windows virtual key; dropping", event.key_code);
-                return Ok(());
-            };
-
             let pressing = event.action == ACTION_DOWN;
             let releasing = event.action == ACTION_UP || event.action == ACTION_CANCEL;
             if !pressing && !releasing {
                 log::debug!("Ignoring key event with unexpected action {}", event.action);
                 return Ok(());
             }
+
+            let Some(vk) = android_keycode_to_vk(event.key_code) else {
+                // Committed text (key code 0) and keys with no PC equivalent
+                // that still produced a character are typed as Unicode.
+                if map::types_as_text(&event.text) {
+                    return if send_unicode(&event.text, !pressing) {
+                        Ok(())
+                    } else {
+                        Err("SendInput was blocked or failed for typed text".into())
+                    };
+                }
+                log::debug!("Android keycode {} is not mapped to a Windows virtual key; dropping", event.key_code);
+                return Ok(());
+            };
 
             // Modifiers that came into being since the last event go down first.
             for flag in [KEY_FLAG_SHIFT, KEY_FLAG_CTRL, KEY_FLAG_ALT, KEY_FLAG_META] {
@@ -512,7 +526,7 @@ impl InputInjector for WindowsPointerInjector {
             }
 
             // A failed SendInput is most often UIPI (a higher-integrity window is focused).
-            if !send_scan_code(vk, !pressing) {
+            if !send_scan_code(vk, map::is_extended_android_key(event.key_code), !pressing) {
                 self.pressed_modifiers = modifier_bits;
                 return Err("SendInput was blocked or failed for a key event".into());
             }

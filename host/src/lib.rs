@@ -11,5 +11,5 @@ pub mod server;
 pub mod services;
 pub mod transport;
 pub mod ui_model;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub mod tray;

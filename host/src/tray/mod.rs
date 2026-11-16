@@ -5,20 +5,35 @@
 //!
 //! The tray never blocks the daemon: menu callbacks only post a [`TrayCmd`] to
 //! a channel, [`run`] executes it.
+//!
+//! On Windows the icon is a notification-area icon ([`windows`]) built from the
+//! same [`menu_model`].
 
 pub mod notify;
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use self::windows::run;
 
 use std::sync::Arc;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
 use futures_util::StreamExt;
+#[cfg(target_os = "linux")]
 use ksni::menu::{CheckmarkItem, StandardItem, SubMenu};
+#[cfg(target_os = "linux")]
 use ksni::{MenuItem, Status, TrayMethods};
+#[cfg(target_os = "linux")]
 use tokio::sync::mpsc;
 
 use crate::daemon::core::DaemonCore;
 use crate::devices::Role;
-use crate::ipc::proto::{role_key, DeviceInfo, Event, Request};
+#[cfg(target_os = "linux")]
+use crate::ipc::proto::Event;
+use crate::ipc::proto::{role_key, DeviceInfo, Request};
+#[cfg(target_os = "linux")]
 use notify::{notice_for, parse_action, NoticeAction};
 
 /// What a menu click asks for.
@@ -31,10 +46,58 @@ pub enum TrayCmd {
     Quit,
 }
 
+/// One entry of the tray menu, independent of the toolkit that draws it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MenuEntry {
+    Item { label: String, cmd: Option<TrayCmd>, checked: bool, enabled: bool },
+    Sub { label: String, entries: Vec<MenuEntry> },
+    Separator,
+}
+
+fn item(label: &str, cmd: TrayCmd) -> MenuEntry {
+    MenuEntry::Item { label: label.into(), cmd: Some(cmd), checked: false, enabled: true }
+}
+
+/// Whether a connected device is waiting for the user to pick its role.
+pub fn needs_attention(devices: &[DeviceInfo]) -> bool {
+    devices.iter().any(|d| d.connected && d.role.is_none())
+}
+
+/// The tray menu: open the window, one submenu per device (its roles and
+/// Disconnect), start/stop the server, quit.
+pub fn menu_model(devices: &[DeviceInfo], server_running: bool) -> Vec<MenuEntry> {
+    let mut m = vec![item("Open DisplaySwarm", TrayCmd::OpenUi), MenuEntry::Separator];
+    if devices.is_empty() {
+        m.push(MenuEntry::Item { label: "No devices yet".into(), cmd: None, checked: false, enabled: false });
+    }
+    for d in devices {
+        let mut entries: Vec<MenuEntry> = Role::ALL
+            .iter()
+            .map(|&role| MenuEntry::Item {
+                label: role.label().into(),
+                cmd: Some(TrayCmd::SetRole(d.device_id.clone(), role)),
+                checked: d.role.as_deref() == Some(role_key(role)),
+                enabled: true,
+            })
+            .collect();
+        if d.connected {
+            entries.push(MenuEntry::Separator);
+            entries.push(item("Disconnect", TrayCmd::Disconnect(d.device_id.clone())));
+        }
+        m.push(MenuEntry::Sub { label: device_label(d), entries });
+    }
+    m.push(MenuEntry::Separator);
+    m.push(item(if server_running { "Stop server" } else { "Start server" }, TrayCmd::ToggleServer));
+    m.push(item("Quit", TrayCmd::Quit));
+    m
+}
+
 /// How often to look again for a tray host after failing to find one (it may
 /// simply start after us at login).
+#[cfg(target_os = "linux")]
 const SNI_RETRY: Duration = Duration::from_secs(20);
 
+#[cfg(target_os = "linux")]
 struct VmTray {
     devices: Vec<DeviceInfo>,
     server_running: bool,
@@ -47,6 +110,7 @@ pub fn device_label(d: &DeviceInfo) -> String {
     format!("{} \u{2013} {}", d.display_name(), state)
 }
 
+#[cfg(target_os = "linux")]
 impl VmTray {
     fn needs_attention(&self) -> bool {
         self.devices.iter().any(|d| d.connected && d.role.is_none())
@@ -86,6 +150,7 @@ impl VmTray {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl ksni::Tray for VmTray {
     fn id(&self) -> String {
         "displayswarm".into()
@@ -158,6 +223,9 @@ impl ksni::Tray for VmTray {
     }
 }
 
+/// The window program's file name.
+const UI_EXE: &str = if cfg!(windows) { "displayswarm.exe" } else { "displayswarm" };
+
 /// Starts the UI process (`displayswarm`, next to this executable or on PATH).
 /// Does nothing if one started by us is still running.
 pub fn open_ui(child: &mut Option<std::process::Child>) {
@@ -169,9 +237,9 @@ pub fn open_ui(child: &mut Option<std::process::Child>) {
     }
     let exe = std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("displayswarm")))
+        .and_then(|p| p.parent().map(|d| d.join(UI_EXE)))
         .filter(|p| p.exists())
-        .unwrap_or_else(|| "displayswarm".into());
+        .unwrap_or_else(|| UI_EXE.into());
     match std::process::Command::new(&exe)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -184,6 +252,7 @@ pub fn open_ui(child: &mut Option<std::process::Child>) {
 
 /// Runs the tray and the notifications until the daemon quits. Never returns
 /// an error: a missing tray or notification service only degrades.
+#[cfg(target_os = "linux")]
 pub async fn run(core: Arc<DaemonCore>) {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<TrayCmd>();
     let mut quit = core.quit_signal();
@@ -288,7 +357,7 @@ pub async fn run(core: Arc<DaemonCore>) {
     }
 }
 
-async fn run_cmd(core: &Arc<DaemonCore>, cmd: TrayCmd, ui_child: &mut Option<std::process::Child>) {
+pub(crate) async fn run_cmd(core: &Arc<DaemonCore>, cmd: TrayCmd, ui_child: &mut Option<std::process::Child>) {
     let result = match cmd {
         TrayCmd::OpenUi => {
             open_ui(ui_child);
@@ -335,6 +404,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn labels_and_attention() {
         assert_eq!(device_label(&dev(true, None, "Connecting")), "Pixel \u{2013} Connecting");
@@ -346,6 +416,34 @@ mod tests {
         assert!(!t.needs_attention());
     }
 
+    #[test]
+    fn menu_model_lists_devices_roles_and_actions() {
+        let devices = vec![dev(true, Some(Role::Extend), "Streaming"), dev(false, None, "")];
+        let m = menu_model(&devices, true);
+        assert_eq!(m[0], item("Open DisplaySwarm", TrayCmd::OpenUi));
+        let subs: Vec<&Vec<MenuEntry>> =
+            m.iter().filter_map(|e| if let MenuEntry::Sub { entries, .. } = e { Some(entries) } else { None }).collect();
+        assert_eq!(subs.len(), 2);
+        let checked: Vec<&str> = subs[0]
+            .iter()
+            .filter_map(|e| match e {
+                MenuEntry::Item { label, checked: true, .. } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(checked, ["Extend"]);
+        assert!(subs[0].iter().any(|e| matches!(e, MenuEntry::Item { cmd: Some(TrayCmd::Disconnect(_)), .. })));
+        assert!(!subs[1].iter().any(|e| matches!(e, MenuEntry::Item { cmd: Some(TrayCmd::Disconnect(_)), .. })),
+            "a device that is not connected cannot be disconnected");
+        assert!(m.contains(&item("Stop server", TrayCmd::ToggleServer)));
+        assert_eq!(m.last(), Some(&item("Quit", TrayCmd::Quit)));
+        assert!(needs_attention(&[dev(true, None, "")]));
+        assert!(!needs_attention(&devices));
+        let empty = menu_model(&[], false);
+        assert!(empty.contains(&item("Start server", TrayCmd::ToggleServer)));
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn menu_has_a_submenu_per_device() {
         use ksni::Tray;

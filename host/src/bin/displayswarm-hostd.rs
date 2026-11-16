@@ -7,10 +7,16 @@
 //! Options: `--socket PATH`, `--no-tray`, `--no-server` (do not start the
 //! server until asked), `--help`.
 
+// A background program on Windows: no console window (it logs to a file there,
+// see `logging::init`). Run from a terminal it re-attaches to that console.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use displayswarm_host::daemon::{self, logging, DaemonOptions};
 use displayswarm_host::ipc::{default_socket_path, transport_at};
 
 fn main() {
+    #[cfg(windows)]
+    logging::attach_parent_console();
     let mut socket = default_socket_path();
     let mut tray = true;
     let mut start_server = None;

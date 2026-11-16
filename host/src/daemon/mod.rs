@@ -52,9 +52,9 @@ pub async fn start(opts: DaemonOptions) -> Result<Daemon, String> {
     if opts.start_server.unwrap_or_else(|| core.settings().autostart_server) {
         core.start_server();
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     let tray_task = opts.tray.then(|| tokio::spawn(crate::tray::run(core.clone())));
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", windows)))]
     let tray_task = None;
     Ok(Daemon { core, transport: opts.transport, ipc_task, tray_task })
 }

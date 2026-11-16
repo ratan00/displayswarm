@@ -179,9 +179,13 @@ mod windows_pipe {
 
     /// A named pipe for the user, local clients only.
     ///
-    /// UNVERIFIED on Windows: the pipe gets the default security descriptor
-    /// (full control for the creator, SYSTEM and Administrators, read for
-    /// everyone else); a tighter DACL is left for the installer work.
+    /// The pipe's DACL grants access to the current user's SID and SYSTEM only
+    /// (the default would also let Administrators in and give everyone else
+    /// read access), and a client talks to the pipe only after checking that
+    /// its server process runs as the same user. Without that check another
+    /// account on the machine could create the pipe name first and pose as the
+    /// daemon. Together they are what the Unix socket's 0600 mode and the
+    /// owner-only directory give on Linux.
     pub struct NamedPipeTransport {
         pub path: PathBuf,
         name: String,
@@ -205,7 +209,7 @@ mod windows_pipe {
             Box::pin(async move {
                 self.next.connect().await?;
                 // A new instance must be waiting before the connected one is handed out.
-                let fresh = ServerOptions::new().reject_remote_clients(true).create(&self.name)?;
+                let fresh = security::create(ServerOptions::new().reject_remote_clients(true), &self.name)?;
                 let connected = std::mem::replace(&mut self.next, fresh);
                 Ok(Box::new(connected) as BoxedStream)
             })
@@ -227,8 +231,10 @@ mod windows_pipe {
                 if let Some(dir) = self.path.parent() {
                     std::fs::create_dir_all(dir)?;
                 }
-                let next =
-                    ServerOptions::new().first_pipe_instance(true).reject_remote_clients(true).create(&self.name)?;
+                let next = security::create(
+                    ServerOptions::new().first_pipe_instance(true).reject_remote_clients(true),
+                    &self.name,
+                )?;
                 Ok(Box::new(Listener { name: self.name.clone(), next }) as Box<dyn IpcListener>)
             })
         }
@@ -240,7 +246,10 @@ mod windows_pipe {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
                 loop {
                     match ClientOptions::new().open(&self.name) {
-                        Ok(c) => return Ok(Box::new(c) as BoxedStream),
+                        Ok(c) => {
+                            security::check_server(&c)?;
+                            return Ok(Box::new(c) as BoxedStream);
+                        }
                         Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && std::time::Instant::now() < deadline => {
                             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                         }
@@ -254,6 +263,99 @@ mod windows_pipe {
 
         fn describe(&self) -> String {
             self.name.clone()
+        }
+    }
+
+    /// The pipe's access control.
+    mod security {
+        use std::io;
+        use std::os::windows::io::AsRawHandle;
+        use tokio::net::windows::named_pipe::{NamedPipeClient, NamedPipeServer, ServerOptions};
+        use ::windows::core::{PCWSTR, PWSTR};
+        use ::windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
+        use ::windows::Win32::Security::Authorization::{
+            ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        };
+        use ::windows::Win32::Security::{
+            EqualSid, GetTokenInformation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
+            TOKEN_USER,
+        };
+        use ::windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
+        use ::windows::Win32::System::Threading::{
+            GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        fn os(e: ::windows::core::Error) -> io::Error {
+            io::Error::from_raw_os_error(e.code().0 & 0xFFFF)
+        }
+
+        /// A process's token user (its `TOKEN_USER` buffer; the SID points into it).
+        fn token_user(process: HANDLE) -> io::Result<Vec<u8>> {
+            unsafe {
+                let mut token = HANDLE::default();
+                OpenProcessToken(process, TOKEN_QUERY, &mut token).map_err(os)?;
+                let mut len = 0u32;
+                let _ = GetTokenInformation(token, TokenUser, None, 0, &mut len);
+                let mut buf = vec![0u8; len.max(64) as usize];
+                let r = GetTokenInformation(token, TokenUser, Some(buf.as_mut_ptr().cast()), buf.len() as u32, &mut len);
+                let _ = CloseHandle(token);
+                r.map_err(os)?;
+                Ok(buf)
+            }
+        }
+
+        fn sid_of(buf: &[u8]) -> ::windows::Win32::Security::PSID {
+            unsafe { (*(buf.as_ptr() as *const TOKEN_USER)).User.Sid }
+        }
+
+        /// SDDL granting full access to the current user and SYSTEM, nobody else.
+        fn sddl() -> io::Result<String> {
+            let me = token_user(unsafe { GetCurrentProcess() })?;
+            unsafe {
+                let mut text = PWSTR::null();
+                ConvertSidToStringSidW(sid_of(&me), &mut text).map_err(os)?;
+                let sid = text.to_string().unwrap_or_default();
+                let _ = LocalFree(HLOCAL(text.0.cast()));
+                Ok(format!("D:P(A;;GA;;;{sid})(A;;GA;;;SY)"))
+            }
+        }
+
+        /// Creates a pipe instance with the owner-only DACL.
+        pub fn create(opts: &mut ServerOptions, name: &str) -> io::Result<NamedPipeServer> {
+            let text: Vec<u16> = sddl()?.encode_utf16().chain(std::iter::once(0)).collect();
+            unsafe {
+                let mut sd = PSECURITY_DESCRIPTOR::default();
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(PCWSTR(text.as_ptr()), SDDL_REVISION_1, &mut sd, None)
+                    .map_err(os)?;
+                let mut attrs = SECURITY_ATTRIBUTES {
+                    nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                    lpSecurityDescriptor: sd.0,
+                    bInheritHandle: false.into(),
+                };
+                let r = opts.create_with_security_attributes_raw(name, &mut attrs as *mut _ as *mut std::ffi::c_void);
+                let _ = LocalFree(HLOCAL(sd.0));
+                r
+            }
+        }
+
+        /// Refuses a pipe whose server process does not run as this user.
+        pub fn check_server(pipe: &NamedPipeClient) -> io::Result<()> {
+            let denied = |why: &str| io::Error::new(io::ErrorKind::PermissionDenied, format!("not our daemon: {why}"));
+            unsafe {
+                let mut pid = 0u32;
+                GetNamedPipeServerProcessId(HANDLE(pipe.as_raw_handle()), &mut pid).map_err(os)?;
+                let process =
+                    OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).map_err(|_| denied("cannot open its process"))?;
+                let theirs = token_user(process);
+                let _ = CloseHandle(process);
+                let theirs = theirs.map_err(|_| denied("cannot read its user"))?;
+                let mine = token_user(GetCurrentProcess())?;
+                if EqualSid(sid_of(&mine), sid_of(&theirs)).is_ok() {
+                    Ok(())
+                } else {
+                    Err(denied("it runs as another user"))
+                }
+            }
         }
     }
 }

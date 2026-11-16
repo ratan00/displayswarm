@@ -10,6 +10,10 @@
 //! no tray, stops when the window closes), `--cli`/`--headless` runs just that
 //! in-process daemon without a window.
 
+// A GUI program on Windows: no console window opens next to it. `--cli` and a
+// launch from a terminal re-attach to the parent's console (see `main`).
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -479,7 +483,7 @@ async fn connection_loop(weak: Weak<MainWindow>, transport: Arc<dyn IpcTransport
                 } else if failures >= 20 {
                     post(
                         &weak,
-                        UiMsg::Link(Some("The daemon is not answering. Run displayswarm-hostd in a terminal to see why.".into())),
+                        UiMsg::Link(Some(format!("The daemon is not answering. {}", logging::where_to_look()))),
                     );
                 }
                 failures += 1;
@@ -769,6 +773,8 @@ fn wire_callbacks(ui: &MainWindow) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(windows)]
+    logging::attach_parent_console();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let headless = args.iter().any(|a| a == "--cli" || a == "--headless");
     let standalone = headless || args.iter().any(|a| a == "--standalone");

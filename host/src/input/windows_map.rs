@@ -90,6 +90,44 @@ pub fn injection_point(x: i32, y: i32, virtual_screen: OutputRegion) -> (i32, i3
     (x - virtual_screen.x, y - virtual_screen.y)
 }
 
+/// Whether the key needs `KEYEVENTF_EXTENDEDKEY` (its PC scan code is
+/// E0-prefixed). Decided from the Android key code, not the virtual key,
+/// because two different physical keys share `VK_RETURN`: the main Enter
+/// (not extended) and the keypad Enter (extended).
+///
+/// Getting this list wrong is silent and confusing: without the flag Windows
+/// resolves the scan code against the *main* block, so the arrow keys move the
+/// numpad and Insert/Delete/Home/End/PageUp/PageDown become keypad digits; with
+/// it on the main Enter, applications that tell the two Enters apart see the
+/// keypad one. The set follows Microsoft's "Extended-Key Flag" list plus the
+/// Windows and application keys, whose set-1 scan codes are E0 5B/5C/5D.
+pub fn is_extended_android_key(key_code: u16) -> bool {
+    matches!(
+        key_code,
+        19 | 20 | 21 | 22          // DPAD_UP/DOWN/LEFT/RIGHT (arrows)
+        | 124 | 112 | 122 | 123   // INSERT, FORWARD_DEL, MOVE_HOME, MOVE_END
+        | 92 | 93                 // PAGE_UP, PAGE_DOWN
+        | 114 | 58                // CTRL_RIGHT, ALT_RIGHT
+        | 117 | 118 | 79          // META_LEFT, META_RIGHT, MENU (application key)
+        | 154 | 160               // NUMPAD_DIVIDE, NUMPAD_ENTER
+        | 143                     // NUM_LOCK
+        | 120 | 121               // SYSRQ (Print Screen), BREAK
+        | 4 | 125 | 3 | 81        // browser back/forward/home/search
+    )
+}
+
+/// Whether a key event with no Windows virtual key should be typed as text:
+/// committed text arrives with key code 0, and any other unmapped key that
+/// still produced printable characters is typed as those characters.
+pub fn types_as_text(text: &str) -> bool {
+    !text.is_empty() && !text.chars().any(char::is_control)
+}
+
+/// The UTF-16 code units `KEYEVENTF_UNICODE` sends for `text`.
+pub fn utf16_units(text: &str) -> Vec<u16> {
+    text.encode_utf16().collect()
+}
+
 /// Whole pixels to move the cursor for a relative step of `(dx, dy)`, carrying
 /// the fractions in `frac` so slow movement is not lost to truncation.
 pub fn take_relative(frac: &mut (f32, f32), dx: f32, dy: f32) -> (i32, i32) {
@@ -363,6 +401,30 @@ mod tests {
         assert_eq!(injection_point(1920, 0, vs), (3840, 100));
         let primary_first = OutputRegion { x: 0, y: 0, width: 1920, height: 1080 };
         assert_eq!(injection_point(5, 7, primary_first), (5, 7));
+    }
+
+    #[test]
+    fn only_e0_keys_are_extended() {
+        assert!(!is_extended_android_key(66), "the main Enter is not the keypad Enter");
+        assert!(is_extended_android_key(160), "NUMPAD_ENTER is E0 1C");
+        for arrow in [19, 20, 21, 22] {
+            assert!(is_extended_android_key(arrow));
+        }
+        assert!(is_extended_android_key(117) && is_extended_android_key(118), "Windows keys are E0 5B/5C");
+        assert!(!is_extended_android_key(113), "left Ctrl is not extended");
+        assert!(is_extended_android_key(114), "right Ctrl is");
+        assert!(!is_extended_android_key(29), "letters are not");
+    }
+
+    #[test]
+    fn committed_text_is_typed_as_unicode() {
+        assert!(types_as_text("h"));
+        assert!(types_as_text("\u{e9}"));
+        assert!(!types_as_text(""));
+        assert!(!types_as_text("\u{8}"), "control characters are keys, not text");
+        assert_eq!(utf16_units("a\u{e9}"), vec![0x61, 0xE9]);
+        // An emoji outside the BMP goes as its surrogate pair.
+        assert_eq!(utf16_units("\u{1F600}"), vec![0xD83D, 0xDE00]);
     }
 
     #[test]
