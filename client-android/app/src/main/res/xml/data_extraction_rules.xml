@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ backup and device-to-device transfer. The paired PCs (their
+  certificates and per-device tokens) and the device identity are tied to this
+  phone: restored on another device they would let it pose as this one, so
+  they are never copied. Settings are.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="displayswarm_wifi.xml" />
+        <exclude domain="sharedpref" path="displayswarm_identity.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="displayswarm_wifi.xml" />
+        <exclude domain="sharedpref" path="displayswarm_identity.xml" />
+    </device-transfer>
+</data-extraction-rules>

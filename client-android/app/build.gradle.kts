@@ -87,4 +87,6 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.8.2")
     implementation("androidx.input:input-motionprediction:1.0.0-beta05")
     testImplementation("junit:junit:4.13.2")
+    // The real org.json for unit tests; android.jar only has stubs there.
+    testImplementation("org.json:json:20240303")
 }

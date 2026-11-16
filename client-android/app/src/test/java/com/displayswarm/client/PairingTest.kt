@@ -223,6 +223,18 @@ class PairingTest {
     }
 
     @Test
+    fun knownHostTokensAreStoredSealedAndLegacyOnesStillRead() {
+        var text: String? = """[{"name":"desk","host":"h","port":1,"fp":"${"ab".repeat(32)}","token":"0102","seen":0}]"""
+        val store = KnownHostStore({ text }, { text = it }, seal = { "sealed:" + it.reversed() }, open = {
+            if (it.startsWith("sealed:")) it.removePrefix("sealed:").reversed() else it
+        })
+        assertEquals("a token from before sealing is read as is", "0102", store.all().single().tokenHex)
+        store.put(KnownHost("pc2", "h2", 2, "cd".repeat(32), "0a0b"))
+        assertFalse(text!!.contains("\"0102\"") || text!!.contains("\"0a0b\""))
+        assertEquals(listOf("0102", "0a0b"), store.all().map { it.tokenHex })
+    }
+
+    @Test
     fun hostInfoFromTxtAndAutoConnect() {
         val txt = mapOf(
             "v" to "2".toByteArray(), "name" to "desk".toByteArray(),

@@ -57,35 +57,39 @@ data class KnownHost(
     fun matches(h: HostInfo) = h.idPrefix.isNotEmpty() && fingerprintHex.startsWith(h.idPrefix)
 }
 
-/** Persists [KnownHost]s as JSON text (SharedPreferences in the app, memory in tests). */
-class KnownHostStore(private val load: () -> String?, private val save: (String) -> Unit) {
+/**
+ * Persists [KnownHost]s as JSON text (SharedPreferences in the app, memory in
+ * tests). Tokens go through [seal]/[open] on the way ([TokenVault] in the app).
+ */
+class KnownHostStore(
+    private val load: () -> String?,
+    private val save: (String) -> Unit,
+    private val seal: (String) -> String = { it },
+    private val open: (String) -> String = { it }
+) {
     fun all(): List<KnownHost> = try {
         val arr = JSONArray(load() ?: "[]")
         (0 until arr.length()).map {
             val o = arr.getJSONObject(it)
             KnownHost(
                 o.getString("name"), o.getString("host"), o.getInt("port"),
-                o.getString("fp"), o.getString("token"), o.optLong("seen")
+                o.getString("fp"), open(o.getString("token")), o.optLong("seen")
             )
         }
     } catch (_: Exception) {
         emptyList()
     }
 
-    fun put(h: KnownHost) {
-        val list = all().filter { it.fingerprintHex != h.fingerprintHex } + h
+    private fun write(list: List<KnownHost>) {
         save(JSONArray(list.map {
             JSONObject().put("name", it.name).put("host", it.host).put("port", it.port)
-                .put("fp", it.fingerprintHex).put("token", it.tokenHex).put("seen", it.lastSeen)
+                .put("fp", it.fingerprintHex).put("token", seal(it.tokenHex)).put("seen", it.lastSeen)
         }).toString())
     }
 
-    fun forget(fingerprintHex: String) {
-        save(JSONArray(all().filter { it.fingerprintHex != fingerprintHex }.map {
-            JSONObject().put("name", it.name).put("host", it.host).put("port", it.port)
-                .put("fp", it.fingerprintHex).put("token", it.tokenHex).put("seen", it.lastSeen)
-        }).toString())
-    }
+    fun put(h: KnownHost) = write(all().filter { it.fingerprintHex != h.fingerprintHex } + h)
+
+    fun forget(fingerprintHex: String) = write(all().filter { it.fingerprintHex != fingerprintHex })
 }
 
 /** The discovered host that should be connected to automatically, if any. */
@@ -108,7 +112,9 @@ class WifiHosts(context: Context) {
     private val prefs = app.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     private val store = KnownHostStore(
         { prefs.getString(KEY_KNOWN, null) },
-        { prefs.edit().putString(KEY_KNOWN, it).apply() }
+        { prefs.edit().putString(KEY_KNOWN, it).apply() },
+        TokenVault::seal,
+        TokenVault::open
     )
     private val nsd = app.getSystemService(Context.NSD_SERVICE) as NsdManager
 
