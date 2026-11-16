@@ -52,6 +52,8 @@ mdns-sd = "0.21.4"
 if-addrs = "0.15"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 sha2 = "0.11.0"
+# P-256 group arithmetic for SPAKE2 pairing (RFC 9382); same RustCrypto generation as sha2/hmac.
+p256 = { version = "0.14", default-features = false, features = ["arithmetic"] }
 hmac = "0.13.0"
 getrandom = "0.3"
 fast_image_resize = { version = "5", default-features = false }

@@ -148,6 +148,13 @@ pub const MSG_FILE_CONTROL: u8 = 0x62;
 pub const PAIR_MODE_TOKEN: u8 = 0;
 pub const PAIR_MODE_PIN: u8 = 1;
 pub const PAIR_MODE_QR: u8 = 2;
+/// PIN pairing through SPAKE2 (RFC 9382). The credential is empty (ask for a
+/// PIN), `PAKE_SHARE` + pA, or `PAKE_CONFIRM` + the phone's confirmation.
+pub const PAIR_MODE_PAKE: u8 = 3;
+/// First credential byte of a `PAIR_MODE_PAKE` request carrying pA.
+pub const PAKE_SHARE: u8 = 1;
+/// First credential byte of a `PAIR_MODE_PAKE` request carrying the confirmation.
+pub const PAKE_CONFIRM: u8 = 2;
 
 /// `PairResponse::status`.
 pub const PAIR_OK: u8 = 0;
@@ -160,6 +167,8 @@ pub const PAIR_LOCKED: u8 = 3;
 pub const PAIR_UNTRUSTED: u8 = 4;
 /// The host is not accepting new devices right now.
 pub const PAIR_DISABLED: u8 = 5;
+/// SPAKE2: the host's share pB is in `token`; send the confirmation next.
+pub const PAIR_PAKE_SHARE: u8 = 6;
 
 /// The channel a known message type travels on, or `None` for an unknown type.
 pub fn channel_of(msg_type: u8) -> Option<u8> {

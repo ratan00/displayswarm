@@ -13,7 +13,9 @@
 //! ([`plan_primary`]); the relative arrangement does not change. The planning
 //! is plain data and unit-tested on every platform.
 
-use super::model::{Layout, LayoutCaps, LayoutOp, Output};
+use super::model::{Layout, LayoutCaps, Output};
+#[cfg(windows)]
+use super::model::LayoutOp;
 use super::OutputRegion;
 
 /// The new top-left of every monitor when `name` becomes primary: everything

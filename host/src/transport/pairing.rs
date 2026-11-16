@@ -5,14 +5,18 @@
 //!
 //! * A **trusted** phone sends `PAIR_MODE_TOKEN` with the per-device token it
 //!   was given when it paired. No PIN is needed again.
-//! * A new phone sends `PAIR_MODE_PIN` with an empty credential. The host shows
+//! * A new phone sends `PAIR_MODE_PAKE` with an empty credential. The host shows
 //!   a 6-digit PIN (log line, [`PairEvent::PinRequested`]) and answers
-//!   `PAIR_PIN_REQUIRED`; the phone then sends `PAIR_MODE_PIN` with
-//!   [`proof`]`(pin, host fingerprint, device id)`. The proof is bound to the
-//!   certificate the phone actually saw, so a man in the middle presenting a
-//!   different certificate cannot complete the pairing. (A 6-digit PIN can be
-//!   brute-forced offline from a captured proof; the QR route below has no such
-//!   weakness.)
+//!   `PAIR_PIN_REQUIRED`. The phone and host then run SPAKE2
+//!   ([`super::spake2`]) with the PIN: the phone sends pA, the host answers pB
+//!   (`PAIR_PAKE_SHARE`), the phone sends its key confirmation, and the host
+//!   answers with the token and its own confirmation. The identities bind the
+//!   device id and the certificate the phone saw, so a man in the middle with
+//!   another certificate cannot confirm, and every run tests one PIN guess at
+//!   most, online: nothing captured can be brute-forced afterwards.
+//! * The older `PAIR_MODE_PIN` proof (an HMAC keyed by the PIN) is refused:
+//!   one captured proof gave the PIN away offline, and accepting it as a
+//!   fallback would let an attacker force it. Such a phone is told to update.
 //! * A phone that scanned the QR code ([`PairingManager::open_qr_offer`]) pins
 //!   the fingerprint from the code and sends `PAIR_MODE_QR` with a proof keyed by
 //!   the code's 128-bit one-time secret.
@@ -43,10 +47,16 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::tls::{fingerprint_hex, Fingerprint};
+use super::spake2;
 use crate::protocol::wire::{
-    Header, Message, CH_CONTROL, HEADER_SIZE, MSG_PAIR_REQUEST, PAIR_DISABLED, PAIR_LOCKED, PAIR_MODE_PIN, PAIR_MODE_QR, PAIR_MODE_TOKEN, PAIR_OK,
+    Header, Message, CH_CONTROL, HEADER_SIZE, MSG_PAIR_REQUEST, PAIR_MODE_PAKE, PAIR_PAKE_SHARE, PAKE_CONFIRM,
+    PAKE_SHARE, PAIR_DISABLED, PAIR_LOCKED, PAIR_MODE_PIN, PAIR_MODE_QR, PAIR_MODE_TOKEN, PAIR_OK,
     PAIR_PIN_REQUIRED, PAIR_UNTRUSTED, PAIR_WRONG,
 };
+
+/// What a phone that only knows the old PIN proof is told.
+pub const UPDATE_THE_APP: &str =
+    "This PC needs a newer DisplaySwarm app to pair with a PIN. Update the app on this phone.";
 
 /// Wrong proofs one source address gets per offer.
 pub const MAX_ATTEMPTS: u32 = 3;
@@ -472,7 +482,7 @@ impl PairingManager {
         if device_id.is_empty() {
             return respond(PAIR_WRONG, "The phone did not identify itself", vec![], false, true);
         }
-        if self.allow_unpaired.load(Ordering::Relaxed) && matches!(mode, PAIR_MODE_TOKEN | PAIR_MODE_PIN | PAIR_MODE_QR) {
+        if self.allow_unpaired.load(Ordering::Relaxed) && matches!(mode, PAIR_MODE_TOKEN | PAIR_MODE_PIN | PAIR_MODE_QR | PAIR_MODE_PAKE) {
             return respond(PAIR_OK, "", vec![], true, false);
         }
         match mode {
@@ -483,7 +493,11 @@ impl PairingManager {
                     respond(PAIR_UNTRUSTED, "This phone is not paired with this PC. Pair it with a PIN.", vec![], false, false)
                 }
             }
-            PAIR_MODE_PIN | PAIR_MODE_QR => self.handle_pairing(peer, fingerprint, mode, device_id, device_name, credential),
+            PAIR_MODE_PIN => respond(PAIR_DISABLED, UPDATE_THE_APP, vec![], false, true),
+            PAIR_MODE_QR => self.handle_pairing(peer, fingerprint, mode, device_id, device_name, credential),
+            PAIR_MODE_PAKE if credential.is_empty() => self.handle_pairing(peer, fingerprint, PAIR_MODE_PIN, device_id, device_name, &[]),
+            // The SPAKE2 steps need the connection's state: see `Exchange`.
+            PAIR_MODE_PAKE => respond(PAIR_WRONG, "Unexpected pairing step", vec![], false, true),
             _ => respond(PAIR_WRONG, "Unknown pairing mode", vec![], false, true),
         }
     }
@@ -525,16 +539,15 @@ impl PairingManager {
         if ct_eq(&proof(&offer.secret, fp, device_id), credential) {
             st.offer = None;
             drop(st);
-            let token = random_bytes::<32>().to_vec();
-            if let Err(e) = self.trust().add(device_id, device_name, &token) {
-                log::warn!("Cannot save the trust store: {e}; the pairing lasts until the host restarts");
-            }
-            log::info!("Paired {device_name:?} ({device_id})");
-            self.emit(PairEvent::Paired { device_id: device_id.into(), device_name: device_name.into() });
-            return respond(PAIR_OK, "Paired", token, true, false);
+            return self.pair(device_id, device_name, &[]);
         }
         offer.wrong += 1;
-        if offer.wrong >= MAX_OFFER_ATTEMPTS {
+        self.wrong_attempt(st, peer, now, device_id)
+    }
+
+    /// Counts a wrong proof (the offer's count already raised) and answers it.
+    fn wrong_attempt(&self, mut st: std::sync::MutexGuard<'_, State>, peer: Option<IpAddr>, now: Instant, device_id: &str) -> Decision {
+        if st.offer.as_ref().is_some_and(|o| o.wrong >= MAX_OFFER_ATTEMPTS) {
             st.offer = None;
             st.locked_until = Some(now + LOCKOUT);
             drop(st);
@@ -556,6 +569,57 @@ impl PairingManager {
         respond(PAIR_WRONG, &format!("Wrong PIN. {left} attempt(s) left."), vec![], false, false)
     }
 
+    /// Pairs `device_id`: stores a new token and answers with it (and, after
+    /// SPAKE2, the host's confirmation appended).
+    fn pair(&self, device_id: &str, device_name: &str, extra: &[u8]) -> Decision {
+        let token = random_bytes::<32>().to_vec();
+        if let Err(e) = self.trust().add(device_id, device_name, &token) {
+            log::warn!("Cannot save the trust store: {e}; the pairing lasts until the host restarts");
+        }
+        log::info!("Paired {device_name:?} ({device_id})");
+        self.emit(PairEvent::Paired { device_id: device_id.into(), device_name: device_name.into() });
+        let mut reply = token;
+        reply.extend_from_slice(extra);
+        respond(PAIR_OK, "Paired", reply, true, false)
+    }
+
+    /// SPAKE2 step 2: the phone's share. Answers pB and keeps the run's keys,
+    /// or refuses. Needs a live PIN offer.
+    fn pake_share(&self, peer: Option<IpAddr>, fp: &Fingerprint, device_id: &str, pa: &[u8]) -> Result<(spake2::Keys, Decision), Decision> {
+        let mut st = self.state();
+        Self::expire(&mut st);
+        if st.peer_is_locked(peer, Instant::now()) {
+            return Err(respond(PAIR_LOCKED, "Too many wrong PINs. Try again in a little while.", vec![], false, true));
+        }
+        let Some(pin) = st.offer.as_ref().filter(|o| o.kind == OfferKind::Pin).map(|o| String::from_utf8_lossy(&o.secret).into_owned()) else {
+            return Err(respond(PAIR_DISABLED, "No pairing is in progress. Start pairing on the PC.", vec![], false, true));
+        };
+        drop(st);
+        let host = spake2::Party::start_b(spake2::password_scalar(&pin), spake2::identity_a(device_id), spake2::identity_b(fp));
+        let keys = host.finish_b(pa).ok_or_else(|| respond(PAIR_WRONG, "Invalid pairing message", vec![], false, true))?;
+        Ok((keys, respond(PAIR_PAKE_SHARE, "", host.share().to_vec(), false, false)))
+    }
+
+    /// SPAKE2 step 3: the phone's confirmation. A wrong one is a wrong PIN.
+    fn pake_confirm(&self, peer: Option<IpAddr>, keys: &spake2::Keys, ca: &[u8], device_id: &str, device_name: &str) -> Decision {
+        let mut st = self.state();
+        Self::expire(&mut st);
+        let now = Instant::now();
+        if st.peer_is_locked(peer, now) {
+            return respond(PAIR_LOCKED, "Too many wrong PINs. Try again in a little while.", vec![], false, true);
+        }
+        let Some(offer) = st.offer.as_mut().filter(|o| o.kind == OfferKind::Pin) else {
+            return respond(PAIR_DISABLED, "No pairing is in progress. Start pairing on the PC.", vec![], false, true);
+        };
+        if spake2::same(ca, &keys.confirm_a()) {
+            st.offer = None;
+            drop(st);
+            return self.pair(device_id, device_name, &keys.confirm_b());
+        }
+        offer.wrong += 1;
+        self.wrong_attempt(st, peer, now, device_id)
+    }
+
     /// Runs the pre-Hello exchange on a fresh TLS stream. `Ok(device_id)` once
     /// the phone is authenticated; the stream is then positioned at its Hello.
     /// Bounded by [`PAIRING_TIMEOUT`].
@@ -564,12 +628,13 @@ impl PairingManager {
         S: AsyncRead + AsyncWrite + Unpin,
     {
         let run = async {
+            let mut exchange = Exchange::default();
             for _ in 0..MAX_REQUESTS_PER_CONNECTION {
                 let msg = read_pair_request(&mut *stream).await?;
                 let Message::PairRequest { mode, device_id, device_name, credential } = msg else {
                     return Err(io::Error::new(io::ErrorKind::InvalidData, "expected a PairRequest first"));
                 };
-                let d = self.handle_request_from(peer, fingerprint, mode, &device_id, &device_name, &credential);
+                let d = exchange.handle(self, peer, fingerprint, mode, &device_id, &device_name, &credential);
                 stream.write_all(&d.reply.encode()).await?;
                 stream.flush().await?;
                 if d.accepted {
@@ -593,6 +658,44 @@ impl PairingManager {
                 r
             }
             Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "pairing timed out")),
+        }
+    }
+}
+
+/// The pairing state of one connection: the SPAKE2 run in progress, if any.
+#[derive(Default)]
+pub struct Exchange {
+    keys: Option<spake2::Keys>,
+}
+
+impl Exchange {
+    /// Handles one request on this connection.
+    pub fn handle(
+        &mut self,
+        m: &PairingManager,
+        peer: Option<IpAddr>,
+        fp: &Fingerprint,
+        mode: u8,
+        device_id: &str,
+        device_name: &str,
+        credential: &[u8],
+    ) -> Decision {
+        if device_id.is_empty() || mode != PAIR_MODE_PAKE || credential.is_empty() || m.allow_unpaired() {
+            return m.handle_request_from(peer, fp, mode, device_id, device_name, credential);
+        }
+        match (credential[0], &credential[1..]) {
+            (PAKE_SHARE, pa) if pa.len() == spake2::POINT_LEN => match m.pake_share(peer, fp, device_id, pa) {
+                Ok((keys, reply)) => {
+                    self.keys = Some(keys);
+                    reply
+                }
+                Err(refusal) => refusal,
+            },
+            (PAKE_CONFIRM, ca) if ca.len() == spake2::CONFIRM_LEN => match self.keys.take() {
+                Some(keys) => m.pake_confirm(peer, &keys, ca, device_id, device_name),
+                None => respond(PAIR_WRONG, "Unexpected pairing step", vec![], false, true),
+            },
+            _ => respond(PAIR_WRONG, "Invalid pairing message", vec![], false, true),
         }
     }
 }
@@ -680,68 +783,120 @@ mod tests {
         }
     }
 
+    /// The phone's side of a SPAKE2 run with `pin`, having seen `seen_fp`:
+    /// the host's last answer, and the keys the phone derived (if it got that far).
+    fn phone_attempt(
+        m: &PairingManager,
+        peer: Option<IpAddr>,
+        host_fp: &Fingerprint,
+        seen_fp: &Fingerprint,
+        id: &str,
+        pin: &str,
+    ) -> (Decision, Option<spake2::Keys>) {
+        let mut ex = Exchange::default();
+        let phone = spake2::Party::start_a(spake2::password_scalar(pin), spake2::identity_a(id), spake2::identity_b(seen_fp));
+        let mut share = vec![PAKE_SHARE];
+        share.extend_from_slice(phone.share());
+        let d = ex.handle(m, peer, host_fp, PAIR_MODE_PAKE, id, "Phone", &share);
+        if status(&d) != PAIR_PAKE_SHARE {
+            return (d, None);
+        }
+        let keys = phone.finish_a(&token_of(&d)).expect("valid pB");
+        let mut confirm = vec![PAKE_CONFIRM];
+        confirm.extend_from_slice(&keys.confirm_a());
+        (ex.handle(m, peer, host_fp, PAIR_MODE_PAKE, id, "Phone", &confirm), Some(keys))
+    }
+
+    fn ask_pin(m: &PairingManager, peer: Option<IpAddr>, id: &str) -> Decision {
+        m.handle_request_from(peer, &FP, PAIR_MODE_PAKE, id, "Phone", &[])
+    }
+
     #[test]
-    fn right_pin_pairs_and_the_token_then_reconnects_without_a_pin() {
+    fn the_right_pin_pairs_over_spake2_and_the_token_then_reconnects() {
         let m = PairingManager::in_memory();
-        let d = m.handle_request(&FP, PAIR_MODE_PIN, "phone", "Phone", &[]);
+        let d = ask_pin(&m, None, "phone");
         assert_eq!(status(&d), PAIR_PIN_REQUIRED);
         let pin = pin_of(&m);
-        let d = m.handle_request(&FP, PAIR_MODE_PIN, "phone", "Phone", &proof(pin.as_bytes(), &FP, "phone"));
+        let (d, keys) = phone_attempt(&m, None, &FP, &FP, "phone", &pin);
         assert!(d.accepted);
         assert_eq!(status(&d), PAIR_OK);
-        let token = token_of(&d);
-        assert_eq!(token.len(), 32);
+        let reply = token_of(&d);
+        assert_eq!(reply.len(), 64, "token and the host's confirmation");
+        let (token, confirm_b) = reply.split_at(32);
+        assert_eq!(confirm_b, keys.unwrap().confirm_b(), "the phone can check the host knew the PIN");
         assert!(m.pending_offer().is_none(), "an offer is single use");
 
-        let again = m.handle_request(&FP, PAIR_MODE_TOKEN, "phone", "Phone", &token);
+        let again = m.handle_request(&FP, PAIR_MODE_TOKEN, "phone", "Phone", token);
         assert!(again.accepted);
         let bad = m.handle_request(&FP, PAIR_MODE_TOKEN, "phone", "Phone", &[0u8; 32]);
         assert_eq!(status(&bad), PAIR_UNTRUSTED);
-        let other = m.handle_request(&FP, PAIR_MODE_TOKEN, "other", "Other", &token);
+        let other = m.handle_request(&FP, PAIR_MODE_TOKEN, "other", "Other", token);
         assert_eq!(status(&other), PAIR_UNTRUSTED, "a token is bound to its device");
     }
 
+    #[test]
+    fn the_old_pin_proof_is_refused_with_a_reason() {
+        let m = PairingManager::in_memory();
+        let pin = m.open_pin_offer(Duration::from_secs(60)).unwrap();
+        for credential in [vec![], proof(pin.as_bytes(), &FP, "p")] {
+            let d = m.handle_request(&FP, PAIR_MODE_PIN, "p", "P", &credential);
+            assert_eq!(status(&d), PAIR_DISABLED);
+            assert!(!d.accepted && d.close);
+            assert!(matches!(&d.reply, Message::PairResponse { message, .. } if message == UPDATE_THE_APP));
+        }
+    }
+
+    #[test]
+    fn a_confirmation_without_a_share_or_garbage_is_refused() {
+        let m = PairingManager::in_memory();
+        ask_pin(&m, None, "p");
+        let mut ex = Exchange::default();
+        let mut confirm = vec![PAKE_CONFIRM];
+        confirm.extend_from_slice(&[0u8; 32]);
+        assert_eq!(status(&ex.handle(&m, None, &FP, PAIR_MODE_PAKE, "p", "P", &confirm)), PAIR_WRONG);
+        let mut bad_point = vec![PAKE_SHARE];
+        bad_point.extend_from_slice(&[4u8; 65]);
+        assert_eq!(status(&ex.handle(&m, None, &FP, PAIR_MODE_PAKE, "p", "P", &bad_point)), PAIR_WRONG);
+    }
     #[test]
     fn wrong_pins_lock_out_that_address_but_not_other_phones() {
         let m = PairingManager::in_memory();
         let attacker = Some(IpAddr::from([192, 168, 1, 66]));
         let phone = Some(IpAddr::from([192, 168, 1, 20]));
-        m.handle_request_from(phone, &FP, PAIR_MODE_PIN, "p", "P", &[]);
+        ask_pin(&m, phone, "p");
         let pin = pin_of(&m);
-        let wrong = proof(b"not the pin", &FP, "x");
+        let wrong = if pin == "000000" { "000001" } else { "000000" };
         for i in 1..MAX_ATTEMPTS {
-            let d = m.handle_request_from(attacker, &FP, PAIR_MODE_PIN, "x", "X", &wrong);
+            let (d, _) = phone_attempt(&m, attacker, &FP, &FP, "x", wrong);
             assert_eq!(status(&d), PAIR_WRONG, "attempt {i}");
             assert!(!d.close);
         }
-        let d = m.handle_request_from(attacker, &FP, PAIR_MODE_PIN, "x", "X", &wrong);
+        let (d, _) = phone_attempt(&m, attacker, &FP, &FP, "x", wrong);
         assert_eq!(status(&d), PAIR_LOCKED);
         assert!(d.close);
         // Locked out: even the right PIN from that address is refused...
-        let d = m.handle_request_from(attacker, &FP, PAIR_MODE_PIN, "x", "X", &proof(pin.as_bytes(), &FP, "x"));
+        let (d, _) = phone_attempt(&m, attacker, &FP, &FP, "x", &pin);
         assert_eq!(status(&d), PAIR_LOCKED);
         // ...but the phone the user is pairing still can.
-        let d = m.handle_request_from(phone, &FP, PAIR_MODE_PIN, "p", "P", &proof(pin.as_bytes(), &FP, "p"));
+        let (d, _) = phone_attempt(&m, phone, &FP, &FP, "p", &pin);
         assert!(d.accepted);
     }
-
     #[test]
     fn an_offer_is_void_after_too_many_wrong_proofs_from_everyone() {
         let m = PairingManager::in_memory();
         let pin = m.open_pin_offer(Duration::from_secs(60)).unwrap();
-        let wrong = proof(b"nope", &FP, "x");
+        let wrong = if pin == "000000" { "000001" } else { "000000" };
         let mut last = None;
         for i in 0..MAX_OFFER_ATTEMPTS {
             // A new address each time, as an attacker spoofing addresses would.
             let peer = Some(IpAddr::from([10, 0, 0, i as u8 + 1]));
-            last = Some(m.handle_request_from(peer, &FP, PAIR_MODE_PIN, "x", "X", &wrong));
+            last = Some(phone_attempt(&m, peer, &FP, &FP, "x", wrong).0);
         }
         assert_eq!(status(&last.unwrap()), PAIR_LOCKED);
-        let d = m.handle_request_from(Some(IpAddr::from([10, 9, 9, 9])), &FP, PAIR_MODE_PIN, "p", "P", &proof(pin.as_bytes(), &FP, "p"));
+        let (d, _) = phone_attempt(&m, Some(IpAddr::from([10, 9, 9, 9])), &FP, &FP, "p", &pin);
         assert!(!d.accepted, "the offer is void");
         assert!(m.open_pin_offer(Duration::from_secs(60)).is_none(), "and new offers wait out the lock-out");
     }
-
     #[test]
     fn two_phones_of_the_same_model_stay_paired() {
         let mut s = TrustStore::in_memory();
@@ -769,24 +924,25 @@ mod tests {
     }
 
     #[test]
-    fn a_proof_for_another_certificate_does_not_pair() {
+    fn a_phone_that_saw_another_certificate_cannot_pair() {
         let m = PairingManager::in_memory();
         let pin = m.open_pin_offer(Duration::from_secs(60)).unwrap();
+        // A man in the middle relays with its own certificate: the phone binds
+        // the run to the certificate it saw, the host to its own.
         let mitm_fp = [9u8; 32];
-        let d = m.handle_request(&FP, PAIR_MODE_PIN, "p", "P", &proof(pin.as_bytes(), &mitm_fp, "p"));
+        let (d, _) = phone_attempt(&m, None, &FP, &mitm_fp, "p", &pin);
         assert!(!d.accepted);
+        assert_eq!(status(&d), PAIR_WRONG);
     }
-
     #[test]
     fn pairing_without_an_offer_or_after_expiry_is_disabled() {
         let m = PairingManager::in_memory();
-        let d = m.handle_request(&FP, PAIR_MODE_PIN, "p", "P", &[1, 2, 3]);
+        let (d, _) = phone_attempt(&m, None, &FP, &FP, "p", "123456");
         assert_eq!(status(&d), PAIR_DISABLED);
         let pin = m.open_pin_offer(Duration::ZERO).unwrap();
-        let d = m.handle_request(&FP, PAIR_MODE_PIN, "p", "P", &proof(pin.as_bytes(), &FP, "p"));
+        let (d, _) = phone_attempt(&m, None, &FP, &FP, "p", &pin);
         assert_eq!(status(&d), PAIR_DISABLED, "expired");
     }
-
     #[test]
     fn qr_offer_pairs_with_its_secret_and_carries_the_fingerprint() {
         let m = PairingManager::in_memory();
@@ -811,10 +967,10 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let s2 = seen.clone();
         m.set_event_listener(move |e| s2.lock().unwrap().push(e));
-        m.handle_request(&FP, PAIR_MODE_PIN, "p", "Pixel", &[]);
+        m.handle_request(&FP, PAIR_MODE_PAKE, "p", "Pixel", &[]);
         let pin = pin_of(&m);
-        let d = m.handle_request(&FP, PAIR_MODE_PIN, "p", "Pixel", &proof(pin.as_bytes(), &FP, "p"));
-        let token = token_of(&d);
+        let (d, _) = phone_attempt(&m, None, &FP, &FP, "p", &pin);
+        let token = token_of(&d)[..32].to_vec();
         {
             let seen = seen.lock().unwrap();
             assert!(matches!(&seen[0], PairEvent::PinRequested { pin: p, device_name, .. } if *p == pin && device_name == "Pixel"));
@@ -825,7 +981,6 @@ mod tests {
         let d = m.handle_request(&FP, PAIR_MODE_TOKEN, "p", "Pixel", &token);
         assert_eq!(status(&d), PAIR_UNTRUSTED);
     }
-
     #[test]
     fn trust_store_persists_privately_and_stores_only_a_hash() {
         let path = std::env::temp_dir().join(format!("displayswarm-trust-{}", std::process::id())).join("trusted.json");

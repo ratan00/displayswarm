@@ -10,6 +10,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
 import java.io.ByteArrayInputStream
+import java.io.InputStream
+import java.math.BigInteger
 
 class PairingTest {
     private val fp = ByteArray(32) { 7 }
@@ -34,36 +36,144 @@ class PairingTest {
         )
     }
 
+    /**
+     * A host that runs its side of SPAKE2 with [pin] on whatever the phone sends:
+     * the phone writes a request, the next read returns the answer.
+     */
+    private class FakeHost(val pin: String, val hostFp: ByteArray, val token: ByteArray = ByteArray(32) { 3 }) {
+        private var pending = ByteArray(0)
+        private var pos = 0
+        private var keys: Spake2.Keys? = null
+        val requests = mutableListOf<Wire.Message.PairRequest>()
+        /** Replace the host's confirmation with garbage (a host that does not know the PIN). */
+        var forgeConfirmation = false
+        /** Answer every PIN request the way a host from before SPAKE2 did. */
+        var old = false
+
+        fun write(bytes: ByteArray) {
+            val req = Wire.FrameReader(ByteArrayInputStream(bytes)).next() as Wire.Message.PairRequest
+            requests += req
+            val reply = answer(req)
+            pending = pending.copyOfRange(pos, pending.size) + reply.encode()
+            pos = 0
+        }
+
+        private fun answer(r: Wire.Message.PairRequest): Wire.Message.PairResponse {
+            if (r.mode == Wire.PAIR_MODE_TOKEN) return Wire.Message.PairResponse(Wire.PAIR_UNTRUSTED, "", ByteArray(0))
+            if (old) return Wire.Message.PairResponse(Wire.PAIR_WRONG, "Unknown pairing mode", ByteArray(0))
+            if (r.credential.isEmpty()) return Wire.Message.PairResponse(Wire.PAIR_PIN_REQUIRED, "Enter the PIN", ByteArray(0))
+            val w = Spake2.passwordScalar(pin)
+            val ida = Spake2.identityA(r.deviceId)
+            val idb = Spake2.identityB(hostFp)
+            val body = r.credential.copyOfRange(1, r.credential.size)
+            return when (r.credential[0].toInt()) {
+                Wire.PAKE_SHARE -> {
+                    val y = BigInteger("5eed5eed5eed5eed5eed", 16)
+                    val pB = Spake2.shareB(w, y)
+                    keys = Spake2.derive(ida, idb, body, pB, Spake2.keyB(body, w, y), w, Spake2.AAD)
+                    Wire.Message.PairResponse(Wire.PAIR_PAKE_SHARE, "", pB)
+                }
+                else -> {
+                    val k = keys!!
+                    if (!body.contentEquals(k.confirmA())) {
+                        Wire.Message.PairResponse(Wire.PAIR_WRONG, "Wrong PIN. 2 attempt(s) left.", ByteArray(0))
+                    } else {
+                        val cb = if (forgeConfirmation) ByteArray(32) else k.confirmB()
+                        Wire.Message.PairResponse(Wire.PAIR_OK, "Paired", token + cb)
+                    }
+                }
+            }
+        }
+
+        val input = object : InputStream() {
+            override fun read(): Int = if (pos < pending.size) pending[pos++].toInt() and 0xff else -1
+        }
+    }
+
+    private suspend fun pairWith(host: FakeHost, sec: NetSecurity, seenFp: ByteArray = fp) =
+        Pairing.perform(Wire.FrameReader(host.input), { host.write(it) }, sec, seenFp)
+
     @Test
-    fun pinPairingReturnsTheNewToken() = runBlocking {
-        val writes = mutableListOf<ByteArray>()
+    fun pinPairingRunsSpake2AndReturnsTheNewToken() = runBlocking {
+        val host = FakeHost("123456", fp)
         var got: ByteArray? = null
-        val sec = NetSecurity("dev1", "Phone", pinProvider = { "123456" }, onAuthenticated = { _, t -> got = t })
-        Pairing.perform(
-            reader(resp(Wire.PAIR_PIN_REQUIRED), resp(Wire.PAIR_OK, "Paired", byteArrayOf(1, 2, 3))),
-            { writes += it }, sec, fp
-        )
-        assertArrayEquals(byteArrayOf(1, 2, 3), got)
-        val reqs = sent(writes)
-        assertEquals(Wire.PAIR_MODE_PIN, reqs[0].mode)
-        assertEquals(0, reqs[0].credential.size)
-        assertArrayEquals(Pairing.proof("123456".toByteArray(), fp, "dev1"), reqs[1].credential)
+        pairWith(host, NetSecurity("dev1", "Phone", pinProvider = { "123456" }, onAuthenticated = { _, t -> got = t }))
+        assertArrayEquals(ByteArray(32) { 3 }, got)
+        assertEquals(listOf(Wire.PAIR_MODE_PAKE, Wire.PAIR_MODE_PAKE, Wire.PAIR_MODE_PAKE), host.requests.map { it.mode })
+        assertEquals(0, host.requests[0].credential.size)
+        assertEquals(1 + Spake2.POINT_LEN, host.requests[1].credential.size)
+        // The PIN itself never goes over the wire, in any form a host could check offline.
+        assertFalse(host.requests.any { it.credential.contentEquals(Pairing.proof("123456".toByteArray(), fp, "dev1")) })
     }
 
     @Test
-    fun wrongPinAsksAgainThenLockoutIsReportedToTheUser() = runBlocking {
-        var asked = 0
-        val sec = NetSecurity("dev1", "Phone", pinProvider = { asked++; "000000" })
+    fun aWrongPinAsksAgain() = runBlocking {
+        val host = FakeHost("123456", fp)
+        val pins = ArrayDeque(listOf("000000", "123456"))
+        var hints = mutableListOf<String>()
+        var got: ByteArray? = null
+        pairWith(host, NetSecurity("dev1", "Phone", pinProvider = { hints += it; pins.removeFirst() }, onAuthenticated = { _, t -> got = t }))
+        assertNotNull(got)
+        assertEquals(2, hints.size)
+        assertTrue(hints[1].startsWith("Wrong PIN"))
+    }
+
+    @Test
+    fun aHostThatCannotProveThePinIsNotTrusted() = runBlocking {
+        val host = FakeHost("123456", fp).apply { forgeConfirmation = true }
+        var got: ByteArray? = null
         try {
-            Pairing.perform(
-                reader(resp(Wire.PAIR_PIN_REQUIRED), resp(Wire.PAIR_WRONG, "2 left"), resp(Wire.PAIR_LOCKED, "later")),
-                {}, sec, fp
-            )
+            pairWith(host, NetSecurity("dev1", "Phone", pinProvider = { "123456" }, onAuthenticated = { _, t -> got = t }))
+            fail()
+        } catch (e: PairingException) {
+            assertTrue(e.message!!.contains("could not prove"))
+        }
+        assertNull(got)
+    }
+
+    @Test
+    fun aPhoneThatSawAnotherCertificateCannotPair() = runBlocking {
+        // A man in the middle shows the phone its own certificate.
+        val host = FakeHost("123456", fp)
+        val pins = ArrayDeque(listOf("123456"))
+        try {
+            pairWith(host, NetSecurity("dev1", "Phone", pinProvider = { pins.removeFirstOrNull() }), seenFp = ByteArray(32) { 9 })
+            fail()
+        } catch (e: PairingException) {
+            assertEquals("Pairing cancelled", e.message)
+        }
+    }
+
+    @Test
+    fun forgottenTokenFallsBackToSpake2() = runBlocking {
+        val host = FakeHost("111111", fp)
+        pairWith(host, NetSecurity("dev1", "Phone", token = byteArrayOf(5), pinProvider = { "111111" }))
+        assertEquals(
+            listOf(Wire.PAIR_MODE_TOKEN, Wire.PAIR_MODE_PAKE, Wire.PAIR_MODE_PAKE, Wire.PAIR_MODE_PAKE),
+            host.requests.map { it.mode }
+        )
+    }
+
+    @Test
+    fun anOldHostIsReportedAsNeedingAnUpdate() = runBlocking {
+        val host = FakeHost("123456", fp).apply { old = true }
+        try {
+            pairWith(host, NetSecurity("dev1", "Phone", pinProvider = { "123456" }))
+            fail()
+        } catch (e: PairingException) {
+            assertTrue(e.message!!.contains("Update DisplaySwarm on the PC"))
+        }
+    }
+
+    @Test
+    fun lockoutIsReportedToTheUser() = runBlocking {
+        val sec = NetSecurity("dev1", "Phone", pinProvider = { "000000" })
+        try {
+            Pairing.perform(reader(resp(Wire.PAIR_LOCKED, "later")), {}, sec, fp)
             fail()
         } catch (e: PairingException) {
             assertTrue(e.message!!.startsWith("Pairing locked"))
         }
-        assertEquals(2, asked)
     }
 
     @Test
@@ -76,17 +186,6 @@ class PairingTest {
         val reqs = sent(writes)
         assertEquals(1, reqs.size)
         assertEquals(Wire.PAIR_MODE_TOKEN, reqs[0].mode)
-    }
-
-    @Test
-    fun forgottenTokenFallsBackToAPin() = runBlocking {
-        val writes = mutableListOf<ByteArray>()
-        val sec = NetSecurity("dev1", "Phone", token = byteArrayOf(5), pinProvider = { "111111" })
-        Pairing.perform(
-            reader(resp(Wire.PAIR_UNTRUSTED), resp(Wire.PAIR_PIN_REQUIRED), resp(Wire.PAIR_OK, "", byteArrayOf(4))),
-            { writes += it }, sec, fp
-        )
-        assertEquals(listOf(Wire.PAIR_MODE_TOKEN, Wire.PAIR_MODE_PIN, Wire.PAIR_MODE_PIN), sent(writes).map { it.mode })
     }
 
     @Test

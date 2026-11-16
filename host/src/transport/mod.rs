@@ -4,6 +4,7 @@ pub mod bitrate;
 pub mod firewall;
 pub mod mdns;
 pub mod pairing;
+pub mod spake2;
 pub mod tls;
 
 use std::io;

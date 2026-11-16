@@ -85,12 +85,18 @@ object Wire {
     const val PAIR_MODE_TOKEN = 0
     const val PAIR_MODE_PIN = 1
     const val PAIR_MODE_QR = 2
+    /** PIN pairing through SPAKE2; see `host/src/transport/pairing.rs`. */
+    const val PAIR_MODE_PAKE = 3
+    const val PAKE_SHARE = 1
+    const val PAKE_CONFIRM = 2
     const val PAIR_OK = 0
     const val PAIR_PIN_REQUIRED = 1
     const val PAIR_WRONG = 2
     const val PAIR_LOCKED = 3
     const val PAIR_UNTRUSTED = 4
     const val PAIR_DISABLED = 5
+    /** SPAKE2: the host's share is in `token`. */
+    const val PAIR_PAKE_SHARE = 6
     const val MSG_VIDEO_FRAME = 0x20
     const val MSG_AUDIO_FRAME = 0x30
     const val MSG_MIC_FRAME = 0x31

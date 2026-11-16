@@ -125,7 +125,7 @@ object Pairing {
             // The host forgot this phone: fall through to a PIN.
         }
 
-        request(Wire.PAIR_MODE_PIN, ByteArray(0))
+        request(Wire.PAIR_MODE_PAKE, ByteArray(0))
         var r = response()
         // A host started with pairing off lets the phone straight in.
         if (r.status == Wire.PAIR_OK) return finish(r)
@@ -134,10 +134,34 @@ object Pairing {
         while (true) {
             val pin = security.pinProvider(hint)?.trim()
             if (pin.isNullOrEmpty()) throw PairingException("Pairing cancelled")
-            request(Wire.PAIR_MODE_PIN, proof(pin.toByteArray(Charsets.UTF_8), fingerprint, security.deviceId))
+            // SPAKE2 with the PIN: nothing sent here lets anyone test PINs offline.
+            val phone = Spake2.startA(
+                Spake2.passwordScalar(pin), Spake2.identityA(security.deviceId), Spake2.identityB(fingerprint)
+            )
+            request(Wire.PAIR_MODE_PAKE, byteArrayOf(Wire.PAKE_SHARE.toByte()) + phone.share)
+            r = response()
+            if (r.status != Wire.PAIR_PAKE_SHARE) {
+                if (r.status == Wire.PAIR_WRONG && r.message.isNotBlank() && r.message.startsWith("Wrong PIN")) {
+                    hint = r.message
+                    continue
+                }
+                throw PairingException(refusal(r))
+            }
+            val keys = phone.finish(r.token) ?: throw PairingException("The PC sent an invalid pairing message")
+            request(Wire.PAIR_MODE_PAKE, byteArrayOf(Wire.PAKE_CONFIRM.toByte()) + keys.confirmA())
             r = response()
             when (r.status) {
-                Wire.PAIR_OK -> return finish(r)
+                Wire.PAIR_OK -> {
+                    if (r.token.size != 32 + Spake2.CONFIRM_LEN) throw PairingException("The PC sent an invalid pairing reply")
+                    val token = r.token.copyOfRange(0, 32)
+                    val confirmB = r.token.copyOfRange(32, r.token.size)
+                    // The host proves it knew the PIN too; a stranger cannot.
+                    if (!MessageDigest.isEqual(confirmB, keys.confirmB())) {
+                        throw PairingException("The PC could not prove it knows the PIN; not pairing")
+                    }
+                    security.onAuthenticated(fingerprint, token)
+                    return
+                }
                 Wire.PAIR_WRONG -> hint = r.message
                 else -> throw PairingException(refusal(r))
             }
@@ -146,6 +170,8 @@ object Pairing {
 
     fun refusal(r: Wire.Message.PairResponse): String {
         val detail = r.message.trim()
+        // A host from before SPAKE2 pairing does not know the mode.
+        if (detail == "Unknown pairing mode") return "Update DisplaySwarm on the PC to pair with a PIN"
         val prefix = when (r.status) {
             Wire.PAIR_WRONG -> "Wrong PIN"
             Wire.PAIR_LOCKED -> "Pairing locked"

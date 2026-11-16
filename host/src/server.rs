@@ -4368,8 +4368,11 @@ mod tests {
     /// then a reconnect with the pinned certificate and the token, no PIN.
     #[tokio::test]
     async fn test_loopback_tls_pairing_then_trusted_reconnect() {
-        use crate::protocol::wire::{PAIR_MODE_PIN, PAIR_MODE_TOKEN, PAIR_OK, PAIR_PIN_REQUIRED, PAIR_UNTRUSTED};
-        use crate::transport::pairing::proof;
+        use crate::protocol::wire::{
+            PAIR_MODE_PAKE, PAIR_MODE_TOKEN, PAIR_OK, PAIR_PAKE_SHARE, PAIR_PIN_REQUIRED, PAIR_UNTRUSTED, PAKE_CONFIRM,
+            PAKE_SHARE,
+        };
+        use crate::transport::spake2;
         use crate::transport::tls::{pinned_connector, Pin, TlsIdentity};
 
         let manager = test_manager(&Arc::new(Probe::default()), None, true);
@@ -4413,17 +4416,27 @@ mod tests {
         let req = |mode, cred: Vec<u8>| {
             Message::PairRequest { mode, device_id: "dev1".into(), device_name: "Phone".into(), credential: cred }.encode()
         };
-        w.write_all(&req(PAIR_MODE_PIN, vec![])).await.unwrap();
+        w.write_all(&req(PAIR_MODE_PAKE, vec![])).await.unwrap();
         match r.next().await.unwrap() {
             Message::PairResponse { status, .. } => assert_eq!(status, PAIR_PIN_REQUIRED),
             other => panic!("{other:?}"),
         }
         let pin = manager.pairing().pending_offer().unwrap().pin.unwrap();
-        w.write_all(&req(PAIR_MODE_PIN, proof(pin.as_bytes(), &fp, "dev1"))).await.unwrap();
+        let phone = spake2::Party::start_a(spake2::password_scalar(&pin), spake2::identity_a("dev1"), spake2::identity_b(&fp));
+        w.write_all(&req(PAIR_MODE_PAKE, [&[PAKE_SHARE][..], phone.share()].concat())).await.unwrap();
+        let keys = match r.next().await.unwrap() {
+            Message::PairResponse { status, token, .. } => {
+                assert_eq!(status, PAIR_PAKE_SHARE);
+                phone.finish_a(&token).unwrap()
+            }
+            other => panic!("{other:?}"),
+        };
+        w.write_all(&req(PAIR_MODE_PAKE, [&[PAKE_CONFIRM][..], &keys.confirm_a()].concat())).await.unwrap();
         let token = match r.next().await.unwrap() {
             Message::PairResponse { status, token, .. } => {
                 assert_eq!(status, PAIR_OK);
-                token
+                assert_eq!(&token[32..], keys.confirm_b());
+                token[..32].to_vec()
             }
             other => panic!("{other:?}"),
         };
