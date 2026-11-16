@@ -752,30 +752,32 @@ pub const BIND_ENV_VAR: &str = "DISPLAYSWARM_BIND";
 
 /// Resolves the TCP listen address from a `DISPLAYSWARM_BIND` spec string.
 ///
-/// # Threat model / why loopback is the default
+/// # Threat model
 ///
-/// The TCP transport has **no authentication at all**. A `Hello` message
-/// is the only thing a peer has to send to be admitted to a session, and from
-/// that moment every input message arriving on the socket is handed straight
-/// to the uinput (or Windows synthetic pointer) injector. There is no token, no TLS, no client identity check and
-/// no per-event authorisation.
+/// By default the TCP transport is TLS with a pinned host certificate, and a
+/// phone must pair (PIN or QR) or present the token from an earlier pairing
+/// before its first `Hello` is read ([`crate::transport::NetGate`]). Only then
+/// is it a session whose input reaches the injectors. That secured listener
+/// binds every interface unless `DISPLAYSWARM_BIND` says otherwise, so phones
+/// on the Wi-Fi can find it.
 ///
-/// That means *anyone who can open a TCP connection to this port owns the
-/// logged-in user's input devices and can see the screen.* Binding to
-/// `0.0.0.0` therefore hands that capability to every device on the same
-/// Wi-Fi - coffee-shop networks, hotel and conference networks, dorm LANs - and
-/// to anything that can route to the host at all. A port scan is all it takes
-/// to find. That is materially worse than what a commercial product ships.
+/// Two settings weaken this, and both are deliberate acts:
 ///
-/// So the default is loopback-only. Opening the socket to a network is a
-/// deliberate act the operator has to opt into, and [`run_server`] logs a
-/// prominent warning when they do.
+/// * `DISPLAYSWARM_INSECURE_TCP=1` (development) turns TLS and pairing off.
+///   Then a `Hello` is all a peer needs, and whoever can open a connection
+///   sees the screen and controls the keyboard and mouse. That listener is
+///   loopback-only unless `DISPLAYSWARM_BIND` opens it, and [`run_server`]
+///   warns loudly when it does.
+/// * "Skip pairing" (`DISPLAYSWARM_ALLOW_UNPAIRED`) keeps TLS but lets any
+///   phone that can reach the port in.
+///
+/// This function parses the bind spec.
 ///
 /// # Accepted specs
 ///
 /// | `DISPLAYSWARM_BIND`        | listen address                |
 /// |------------------------|------------------------------|
-/// | unset / `""`           | `127.0.0.1:<port>` (default) |
+/// | unset / `""`           | `127.0.0.1:<port>` (the insecure listener's default; the secured one binds all) |
 /// | `loopback`/`localhost`  | `127.0.0.1:<port>`           |
 /// | `all` / `*` / `0.0.0.0` | `0.0.0.0:<port>`             |
 /// | `1.2.3.4`               | `1.2.3.4:<port>`             |

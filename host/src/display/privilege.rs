@@ -1207,6 +1207,7 @@ mod tests {
     /// must run, print the documented format, and exit 0 even with nothing
     /// provisioned.
     #[test]
+    #[ignore = "needs a machine with the vkms module loaded"]
     #[cfg(target_os = "linux")]
     fn test_helper_status_runs_and_uses_the_documented_format() {
         let dir = std::env::temp_dir().join(format!("vmon-helper-st-{}", std::process::id()));

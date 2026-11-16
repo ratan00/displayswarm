@@ -19,9 +19,17 @@
 //!
 //! A successful pairing yields a random 32-byte token, returned once in the
 //! `PairResponse`; only its SHA-256 is stored (`trusted.json`, mode 0600).
-//! An offer allows [`MAX_ATTEMPTS`] wrong proofs, then it is void and new offers
-//! are refused for [`LOCKOUT`].
+//! Each source address gets [`MAX_ATTEMPTS`] wrong proofs per offer, then it is
+//! locked out for [`LOCKOUT`]; other phones can still use the offer, so one
+//! device on the network cannot stop everyone else from pairing. An offer
+//! takes at most [`MAX_OFFER_ATTEMPTS`] wrong proofs from all addresses
+//! together, then it is void and new offers are refused for [`LOCKOUT`].
+//!
+//! Before a phone is authenticated the host reads nothing but small
+//! `PairRequest` frames on the control channel ([`read_pair_request`]), so an
+//! unauthenticated peer cannot make it buffer more than a few kilobytes.
 
+use std::collections::HashMap;
 use std::io;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -32,16 +40,20 @@ use std::time::{Duration, Instant};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::tls::{fingerprint_hex, Fingerprint};
 use crate::protocol::wire::{
-    Message, MessageReader, PAIR_DISABLED, PAIR_LOCKED, PAIR_MODE_PIN, PAIR_MODE_QR, PAIR_MODE_TOKEN, PAIR_OK,
+    Header, Message, CH_CONTROL, HEADER_SIZE, MSG_PAIR_REQUEST, PAIR_DISABLED, PAIR_LOCKED, PAIR_MODE_PIN, PAIR_MODE_QR, PAIR_MODE_TOKEN, PAIR_OK,
     PAIR_PIN_REQUIRED, PAIR_UNTRUSTED, PAIR_WRONG,
 };
 
-/// Wrong proofs an offer tolerates.
+/// Wrong proofs one source address gets per offer.
 pub const MAX_ATTEMPTS: u32 = 3;
+/// Wrong proofs an offer tolerates from all addresses together.
+pub const MAX_OFFER_ATTEMPTS: u32 = 10;
+/// Largest frame read before the phone is authenticated.
+pub const MAX_PAIR_FRAME: usize = 4096;
 /// How long new offers are refused after an offer was exhausted.
 pub const LOCKOUT: Duration = Duration::from_secs(30);
 /// How long a PIN requested by a phone stays valid.
@@ -186,12 +198,14 @@ impl TrustStore {
         self.devices.iter().any(|d| d.device_id == device_id && ct_eq(d.token_hash.as_bytes(), want.as_bytes()))
     }
 
-    /// Trusts `device_id` with `token`, replacing an earlier pairing of it. The
-    /// app makes a new id whenever it is reinstalled or its data is cleared, so
-    /// an earlier pairing under the same device name is that device's old
-    /// install (its token is gone with it) and is dropped too.
+    /// Trusts `device_id` with `token`, replacing an earlier pairing of it.
+    ///
+    /// Only the same id is replaced. Dropping entries with the same *name* (to
+    /// clean up after a reinstall) would un-pair a second phone of the same
+    /// model, which sends the same name; an old install's entry is harmless
+    /// (its token is gone) and the user removes it from the paired list.
     pub fn add(&mut self, device_id: &str, name: &str, token: &[u8]) -> io::Result<()> {
-        self.devices.retain(|d| d.device_id != device_id && (name.is_empty() || d.name != name));
+        self.devices.retain(|d| d.device_id != device_id);
         self.devices.push(TrustedDevice {
             device_id: device_id.into(),
             name: name.into(),
@@ -240,8 +254,26 @@ struct Offer {
 #[derive(Default)]
 struct State {
     offer: Option<Offer>,
+    /// Every address is refused new offers until then (an offer was exhausted).
     locked_until: Option<Instant>,
     last_pin_request: Option<Instant>,
+    /// Wrong proofs per source address against the current offer.
+    peer_wrong: HashMap<Option<IpAddr>, u32>,
+    /// Addresses locked out, until when.
+    peer_locked: HashMap<Option<IpAddr>, Instant>,
+}
+
+impl State {
+    /// A fresh offer: every address starts with a clean count.
+    fn set_offer(&mut self, offer: Offer) {
+        self.offer = Some(offer);
+        self.peer_wrong.clear();
+    }
+
+    fn peer_is_locked(&mut self, peer: Option<IpAddr>, now: Instant) -> bool {
+        self.peer_locked.retain(|_, until| *until > now);
+        self.peer_locked.contains_key(&peer) || self.locked_until.is_some_and(|t| t > now)
+    }
 }
 
 /// What is currently on offer, for the UI.
@@ -387,7 +419,7 @@ impl PairingManager {
             return None;
         }
         let pin = random_pin();
-        st.offer = Some(Offer { kind: OfferKind::Pin, secret: pin.clone().into_bytes(), expires: Instant::now() + ttl, wrong: 0 });
+        st.set_offer(Offer { kind: OfferKind::Pin, secret: pin.clone().into_bytes(), expires: Instant::now() + ttl, wrong: 0 });
         drop(st);
         log::info!("PAIRING PIN: {pin} (valid {} s)", ttl.as_secs());
         self.emit(PairEvent::PinRequested { device_id: String::new(), device_name: String::new(), pin: pin.clone(), valid_for: ttl });
@@ -409,7 +441,7 @@ impl PairingManager {
             return None;
         }
         let secret = random_bytes::<16>();
-        st.offer = Some(Offer { kind: OfferKind::Qr, secret: secret.to_vec(), expires: Instant::now() + ttl, wrong: 0 });
+        st.set_offer(Offer { kind: OfferKind::Qr, secret: secret.to_vec(), expires: Instant::now() + ttl, wrong: 0 });
         drop(st);
         Some(QrOffer { payload: qr_payload(host_name, host_addr, port, fingerprint, &secret), valid_for: ttl })
     }
@@ -418,6 +450,19 @@ impl PairingManager {
     /// certificate has `fingerprint`. `peer` is only for log lines.
     pub fn handle_request(
         &self,
+        fingerprint: &Fingerprint,
+        mode: u8,
+        device_id: &str,
+        device_name: &str,
+        credential: &[u8],
+    ) -> Decision {
+        self.handle_request_from(None, fingerprint, mode, device_id, device_name, credential)
+    }
+
+    /// [`Self::handle_request`] for a request from `peer` (the lock-out is per address).
+    pub fn handle_request_from(
+        &self,
+        peer: Option<IpAddr>,
         fingerprint: &Fingerprint,
         mode: u8,
         device_id: &str,
@@ -438,22 +483,22 @@ impl PairingManager {
                     respond(PAIR_UNTRUSTED, "This phone is not paired with this PC. Pair it with a PIN.", vec![], false, false)
                 }
             }
-            PAIR_MODE_PIN | PAIR_MODE_QR => self.handle_pairing(fingerprint, mode, device_id, device_name, credential),
+            PAIR_MODE_PIN | PAIR_MODE_QR => self.handle_pairing(peer, fingerprint, mode, device_id, device_name, credential),
             _ => respond(PAIR_WRONG, "Unknown pairing mode", vec![], false, true),
         }
     }
 
-    fn handle_pairing(&self, fp: &Fingerprint, mode: u8, device_id: &str, device_name: &str, credential: &[u8]) -> Decision {
+    fn handle_pairing(&self, peer: Option<IpAddr>, fp: &Fingerprint, mode: u8, device_id: &str, device_name: &str, credential: &[u8]) -> Decision {
         let kind = if mode == PAIR_MODE_QR { OfferKind::Qr } else { OfferKind::Pin };
         let mut st = self.state();
         Self::expire(&mut st);
         let now = Instant::now();
 
+        if st.peer_is_locked(peer, now) {
+            return respond(PAIR_LOCKED, "Too many wrong PINs. Try again in a little while.", vec![], false, true);
+        }
         // Empty credential: the phone asks for a PIN.
         if credential.is_empty() && kind == OfferKind::Pin {
-            if st.locked_until.is_some_and(|t| t > now) {
-                return respond(PAIR_LOCKED, "Too many wrong PINs. Try again in a little while.", vec![], false, true);
-            }
             if matches!(&st.offer, Some(o) if o.kind == OfferKind::Pin) {
                 return respond(PAIR_PIN_REQUIRED, "Enter the PIN shown on the PC", vec![], false, false);
             }
@@ -462,7 +507,7 @@ impl PairingManager {
             }
             let pin = random_pin();
             st.last_pin_request = Some(now);
-            st.offer = Some(Offer { kind: OfferKind::Pin, secret: pin.clone().into_bytes(), expires: now + PIN_TTL, wrong: 0 });
+            st.set_offer(Offer { kind: OfferKind::Pin, secret: pin.clone().into_bytes(), expires: now + PIN_TTL, wrong: 0 });
             drop(st);
             log::info!("PAIRING PIN for {device_name:?} ({device_id}): {pin}");
             self.emit(PairEvent::PinRequested {
@@ -489,14 +534,23 @@ impl PairingManager {
             return respond(PAIR_OK, "Paired", token, true, false);
         }
         offer.wrong += 1;
-        if offer.wrong >= MAX_ATTEMPTS {
+        if offer.wrong >= MAX_OFFER_ATTEMPTS {
             st.offer = None;
             st.locked_until = Some(now + LOCKOUT);
             drop(st);
             self.emit(PairEvent::Failed { device_id: device_id.into(), reason: "too many wrong attempts".into() });
             return respond(PAIR_LOCKED, "Too many wrong attempts. Start pairing again on the PC.", vec![], false, true);
         }
-        let left = MAX_ATTEMPTS - offer.wrong;
+        let mine = st.peer_wrong.entry(peer).or_insert(0);
+        *mine += 1;
+        let mine = *mine;
+        if mine >= MAX_ATTEMPTS {
+            st.peer_locked.insert(peer, now + LOCKOUT);
+            drop(st);
+            self.emit(PairEvent::Failed { device_id: device_id.into(), reason: "too many wrong attempts".into() });
+            return respond(PAIR_LOCKED, "Too many wrong attempts. Try again in a little while.", vec![], false, true);
+        }
+        let left = MAX_ATTEMPTS - mine;
         drop(st);
         self.emit(PairEvent::Failed { device_id: device_id.into(), reason: "wrong PIN".into() });
         respond(PAIR_WRONG, &format!("Wrong PIN. {left} attempt(s) left."), vec![], false, false)
@@ -510,14 +564,12 @@ impl PairingManager {
         S: AsyncRead + AsyncWrite + Unpin,
     {
         let run = async {
-            let mut reader = MessageReader::new(&mut *stream);
             for _ in 0..MAX_REQUESTS_PER_CONNECTION {
-                let msg = reader.next().await?;
+                let msg = read_pair_request(&mut *stream).await?;
                 let Message::PairRequest { mode, device_id, device_name, credential } = msg else {
                     return Err(io::Error::new(io::ErrorKind::InvalidData, "expected a PairRequest first"));
                 };
-                let d = self.handle_request(fingerprint, mode, &device_id, &device_name, &credential);
-                drop(reader);
+                let d = self.handle_request_from(peer, fingerprint, mode, &device_id, &device_name, &credential);
                 stream.write_all(&d.reply.encode()).await?;
                 stream.flush().await?;
                 if d.accepted {
@@ -530,7 +582,6 @@ impl PairingManager {
                     };
                     return Err(io::Error::new(io::ErrorKind::PermissionDenied, why));
                 }
-                reader = MessageReader::new(&mut *stream);
             }
             Err(io::Error::new(io::ErrorKind::PermissionDenied, "too many pairing requests"))
         };
@@ -544,6 +595,26 @@ impl PairingManager {
             Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "pairing timed out")),
         }
     }
+}
+
+/// Reads one `PairRequest` from a peer that is not authenticated yet: a single
+/// unfragmented control frame of at most [`MAX_PAIR_FRAME`] bytes, and nothing
+/// else. The general reader would accept a 16 MiB message on the video channel.
+pub async fn read_pair_request<S: AsyncRead + Unpin>(stream: &mut S) -> io::Result<Message> {
+    let bad = |why: String| io::Error::new(io::ErrorKind::InvalidData, why);
+    let mut raw = [0u8; HEADER_SIZE];
+    stream.read_exact(&mut raw).await?;
+    let h = Header::parse(&raw)?;
+    h.check()?;
+    if h.channel != CH_CONTROL || h.msg_type != MSG_PAIR_REQUEST || h.flags != 0 {
+        return Err(bad(format!("expected a PairRequest first, got type {:#04x} on channel {}", h.msg_type, h.channel)));
+    }
+    if h.len as usize > MAX_PAIR_FRAME {
+        return Err(bad(format!("a {}-byte PairRequest is too large", h.len)));
+    }
+    let mut payload = vec![0u8; h.len as usize];
+    stream.read_exact(&mut payload).await?;
+    Message::decode(h.channel, h.msg_type, &payload)
 }
 
 // ---- QR ------------------------------------------------------------------------
@@ -631,26 +702,70 @@ mod tests {
     }
 
     #[test]
-    fn wrong_pin_is_refused_then_the_offer_locks_after_the_retry_limit() {
+    fn wrong_pins_lock_out_that_address_but_not_other_phones() {
         let m = PairingManager::in_memory();
-        m.handle_request(&FP, PAIR_MODE_PIN, "p", "P", &[]);
+        let attacker = Some(IpAddr::from([192, 168, 1, 66]));
+        let phone = Some(IpAddr::from([192, 168, 1, 20]));
+        m.handle_request_from(phone, &FP, PAIR_MODE_PIN, "p", "P", &[]);
         let pin = pin_of(&m);
-        let wrong = proof(b"not the pin", &FP, "p");
+        let wrong = proof(b"not the pin", &FP, "x");
         for i in 1..MAX_ATTEMPTS {
-            let d = m.handle_request(&FP, PAIR_MODE_PIN, "p", "P", &wrong);
+            let d = m.handle_request_from(attacker, &FP, PAIR_MODE_PIN, "x", "X", &wrong);
             assert_eq!(status(&d), PAIR_WRONG, "attempt {i}");
             assert!(!d.close);
         }
-        let d = m.handle_request(&FP, PAIR_MODE_PIN, "p", "P", &wrong);
+        let d = m.handle_request_from(attacker, &FP, PAIR_MODE_PIN, "x", "X", &wrong);
         assert_eq!(status(&d), PAIR_LOCKED);
         assert!(d.close);
-        // The right PIN no longer works: the offer is void.
-        let d = m.handle_request(&FP, PAIR_MODE_PIN, "p", "P", &proof(pin.as_bytes(), &FP, "p"));
-        assert!(!d.accepted);
-        // And asking for a new PIN is refused during the lock-out.
-        let d = m.handle_request(&FP, PAIR_MODE_PIN, "p", "P", &[]);
+        // Locked out: even the right PIN from that address is refused...
+        let d = m.handle_request_from(attacker, &FP, PAIR_MODE_PIN, "x", "X", &proof(pin.as_bytes(), &FP, "x"));
         assert_eq!(status(&d), PAIR_LOCKED);
-        assert!(m.open_pin_offer(Duration::from_secs(60)).is_none());
+        // ...but the phone the user is pairing still can.
+        let d = m.handle_request_from(phone, &FP, PAIR_MODE_PIN, "p", "P", &proof(pin.as_bytes(), &FP, "p"));
+        assert!(d.accepted);
+    }
+
+    #[test]
+    fn an_offer_is_void_after_too_many_wrong_proofs_from_everyone() {
+        let m = PairingManager::in_memory();
+        let pin = m.open_pin_offer(Duration::from_secs(60)).unwrap();
+        let wrong = proof(b"nope", &FP, "x");
+        let mut last = None;
+        for i in 0..MAX_OFFER_ATTEMPTS {
+            // A new address each time, as an attacker spoofing addresses would.
+            let peer = Some(IpAddr::from([10, 0, 0, i as u8 + 1]));
+            last = Some(m.handle_request_from(peer, &FP, PAIR_MODE_PIN, "x", "X", &wrong));
+        }
+        assert_eq!(status(&last.unwrap()), PAIR_LOCKED);
+        let d = m.handle_request_from(Some(IpAddr::from([10, 9, 9, 9])), &FP, PAIR_MODE_PIN, "p", "P", &proof(pin.as_bytes(), &FP, "p"));
+        assert!(!d.accepted, "the offer is void");
+        assert!(m.open_pin_offer(Duration::from_secs(60)).is_none(), "and new offers wait out the lock-out");
+    }
+
+    #[test]
+    fn two_phones_of_the_same_model_stay_paired() {
+        let mut s = TrustStore::in_memory();
+        s.add("tablet-1", "Galaxy Tab S9", b"t1").unwrap();
+        s.add("tablet-2", "Galaxy Tab S9", b"t2").unwrap();
+        assert!(s.is_trusted("tablet-1", b"t1") && s.is_trusted("tablet-2", b"t2"));
+        s.add("tablet-1", "Galaxy Tab S9", b"t1b").unwrap();
+        assert!(!s.is_trusted("tablet-1", b"t1") && s.is_trusted("tablet-1", b"t1b"));
+        assert_eq!(s.list().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn only_a_small_pair_request_is_read_before_authentication() {
+        use crate::protocol::wire::{write_frames, CH_VIDEO, MAX_FRAGMENT, MSG_VIDEO_FRAME};
+        let ok = Message::PairRequest { mode: PAIR_MODE_PIN, device_id: "d".into(), device_name: "n".into(), credential: vec![] };
+        let bytes = ok.encode();
+        assert_eq!(read_pair_request(&mut &bytes[..]).await.unwrap(), ok);
+        // A video frame before pairing is refused without reading its payload.
+        let mut video = Vec::new();
+        write_frames(CH_VIDEO, MSG_VIDEO_FRAME, &[&[0u8; 1000]], MAX_FRAGMENT, &mut video);
+        assert!(read_pair_request(&mut &video[..]).await.is_err());
+        // So is an oversized PairRequest.
+        let big = Message::PairRequest { mode: PAIR_MODE_PIN, device_id: "d".into(), device_name: "n".repeat(5000), credential: vec![] };
+        assert!(read_pair_request(&mut &big.encode()[..]).await.is_err());
     }
 
     #[test]

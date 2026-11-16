@@ -2503,6 +2503,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs a Wayland session with the ScreenCast portal"]
     fn test_wayland_detection_and_pipewire_portal() {
         assert!(is_pipewire_portal_available());
         let mut pw = PipeWirePortalCapturer::new(640, 480).expect("PipeWire capturer init failed");

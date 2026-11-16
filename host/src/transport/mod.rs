@@ -129,18 +129,64 @@ impl Default for NetworkConfig {
 /// Time a phone gets for the TLS handshake.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Connections still in the TLS handshake or pairing, at most, in total.
+pub const MAX_UNAUTHENTICATED: u32 = 8;
+/// ... and from one address.
+pub const MAX_UNAUTHENTICATED_PER_ADDRESS: u32 = 2;
+
+/// Counts connections that have not authenticated yet, so a device on the
+/// network cannot hold every slot (each may otherwise wait out the pairing
+/// timeout) while the user's phone is turned away.
+#[derive(Default)]
+pub struct PendingLimit {
+    by_address: std::sync::Mutex<std::collections::HashMap<Option<std::net::IpAddr>, u32>>,
+}
+
+/// One claimed slot; given back on drop.
+pub struct PendingSlot<'a> {
+    limit: &'a PendingLimit,
+    address: Option<std::net::IpAddr>,
+}
+
+impl PendingLimit {
+    /// A slot for `address`, or `None` when its share or the total is used up.
+    pub fn claim(&self, address: Option<std::net::IpAddr>) -> Option<PendingSlot<'_>> {
+        let mut map = self.by_address.lock().unwrap_or_else(|e| e.into_inner());
+        let total: u32 = map.values().sum();
+        let mine = map.get(&address).copied().unwrap_or(0);
+        if total >= MAX_UNAUTHENTICATED || mine >= MAX_UNAUTHENTICATED_PER_ADDRESS {
+            return None;
+        }
+        map.insert(address, mine + 1);
+        Some(PendingSlot { limit: self, address })
+    }
+}
+
+impl Drop for PendingSlot<'_> {
+    fn drop(&mut self) {
+        let mut map = self.limit.by_address.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = map.get_mut(&self.address) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.address);
+            }
+        }
+    }
+}
+
 /// Turns accepted TCP connections into authenticated, encrypted streams:
 /// TLS handshake, then the pairing / trusted-token exchange.
 pub struct NetGate {
     pub identity: tls::TlsIdentity,
     pub pairing: Arc<pairing::PairingManager>,
     acceptor: tokio_rustls::TlsAcceptor,
+    pending: PendingLimit,
 }
 
 impl NetGate {
     pub fn new(identity: tls::TlsIdentity, pairing: Arc<pairing::PairingManager>) -> io::Result<Self> {
         let acceptor = identity.acceptor()?;
-        Ok(Self { identity, pairing, acceptor })
+        Ok(Self { identity, pairing, acceptor, pending: PendingLimit::default() })
     }
 
     /// Runs on the connection's own task. `Err` means the phone was refused
@@ -148,6 +194,9 @@ impl NetGate {
     /// Returns the halves positioned at the phone's `Hello`, and the paired device id.
     pub async fn accept(&self, tcp: TcpStream) -> io::Result<(TransportReader, TransportWriter, String)> {
         let peer = tcp.peer_addr().ok().map(|a| a.ip());
+        let _slot = self.pending.claim(peer).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::ConnectionRefused, format!("too many unauthenticated connections ({peer:?})"))
+        })?;
         let mut tls = tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, self.acceptor.accept(tcp))
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out"))??;
@@ -188,6 +237,20 @@ pub fn wifi_direct_status() -> WifiDirect {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unauthenticated_slots_are_limited_per_address_and_in_total() {
+        let limit = PendingLimit::default();
+        let a = Some(std::net::IpAddr::from([10, 0, 0, 1]));
+        let first = limit.claim(a).unwrap();
+        let _second = limit.claim(a).unwrap();
+        assert!(limit.claim(a).is_none(), "one address gets two");
+        drop(first);
+        let _again = limit.claim(a).expect("a slot comes back when its connection ends");
+        let others: Vec<_> = (2..=7).map(|i| limit.claim(Some(std::net::IpAddr::from([10, 0, 0, i]))).unwrap()).collect();
+        assert_eq!(others.len(), 6);
+        assert!(limit.claim(Some(std::net::IpAddr::from([10, 0, 0, 99]))).is_none(), "eight in total");
+    }
 
     #[test]
     fn wifi_direct_needs_a_p2p_device() {

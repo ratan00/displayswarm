@@ -123,11 +123,49 @@ mod unix {
 
     struct Listener(UnixListener);
 
+    /// Refuses a peer that runs as another user. The socket's mode already
+    /// keeps others out; this also covers a socket or directory someone else
+    /// prepared.
+    fn same_user(stream: &UnixStream) -> io::Result<()> {
+        let peer = stream.peer_cred()?.uid();
+        let me = unsafe { libc::getuid() };
+        if peer == me {
+            Ok(())
+        } else {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("IPC peer runs as uid {peer}, not {me}")))
+        }
+    }
+
+    /// The socket's directory must be ours and closed to everyone else. The
+    /// `/tmp` fallback is where this matters: another local user could have
+    /// created `/tmp/displayswarm-<uid>` first and would then control the
+    /// socket inside it. A directory we own but left open is tightened.
+    pub(super) fn check_private_dir(dir: &std::path::Path) -> io::Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = std::fs::symlink_metadata(dir)?;
+        let me = unsafe { libc::getuid() };
+        if !meta.file_type().is_dir() || meta.uid() != me {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{} is not a directory owned by this user; refusing to put the IPC socket there", dir.display()),
+            ));
+        }
+        if meta.mode() & 0o077 != 0 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
+    }
+
     impl IpcListener for Listener {
         fn accept(&mut self) -> BoxFuture<'_, io::Result<BoxedStream>> {
             Box::pin(async move {
-                let (s, _) = self.0.accept().await?;
-                Ok(Box::new(s) as BoxedStream)
+                loop {
+                    let (s, _) = self.0.accept().await?;
+                    match same_user(&s) {
+                        Ok(()) => return Ok(Box::new(s) as BoxedStream),
+                        Err(e) => log::warn!("Refused an IPC connection: {e}"),
+                    }
+                }
             })
         }
     }
@@ -137,6 +175,7 @@ mod unix {
             Box::pin(async move {
                 if let Some(dir) = self.path.parent() {
                     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+                    check_private_dir(dir)?;
                 }
                 // A live daemon answers; a dead one leaves a file nobody serves.
                 if UnixStream::connect(&self.path).await.is_ok() {
@@ -153,7 +192,11 @@ mod unix {
         }
 
         fn connect(&self) -> BoxFuture<'_, io::Result<BoxedStream>> {
-            Box::pin(async move { Ok(Box::new(UnixStream::connect(&self.path).await?) as BoxedStream) })
+            Box::pin(async move {
+                let s = UnixStream::connect(&self.path).await?;
+                same_user(&s)?;
+                Ok(Box::new(s) as BoxedStream)
+            })
         }
 
         fn cleanup(&self) {
@@ -363,6 +406,25 @@ mod windows_pipe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_socket_directory_must_be_ours_and_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("displayswarm-ipc-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        unix::check_private_dir(&dir).unwrap();
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700, "tightened");
+        // A symlink to a directory is not accepted in its place.
+        let link = dir.with_extension("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        assert!(unix::check_private_dir(&link).is_err());
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn pipe_names_are_stable_distinct_and_well_formed() {
