@@ -1272,6 +1272,7 @@ dependencies = [
  "nusb",
  "opus",
  "pipewire",
+ "png",
  "qrcode",
  "rcgen",
  "ring",

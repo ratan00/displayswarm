@@ -8,14 +8,18 @@
 //!
 //! Dropping either service removes its virtual device.
 //!
-//! PipeWire and Opus are Linux-only dependencies. Other platforms build only
-//! the device-independent [`sync`] hub and a stub [`audio_services`] that
-//! offers no service (Windows WASAPI loopback is W3).
+//! On Windows the same Opus path runs on WASAPI instead ([`windows`]): a
+//! loopback capture of the PC's playback, and the phone's mic played into a
+//! virtual cable. Other platforms build only the device-independent [`sync`]
+//! hub and a stub [`audio_services`] that offers no service.
 
+pub mod cable;
 pub mod sync;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub mod codec;
+#[cfg(windows)]
+pub mod windows;
 #[cfg(target_os = "linux")]
 pub mod delay;
 #[cfg(target_os = "linux")]
@@ -26,8 +30,11 @@ pub mod sink;
 #[cfg(target_os = "linux")]
 pub use service::{audio_services, AudioOutService, MicService};
 
-/// No audio services off Linux yet: the session simply has no audio channel.
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+pub use self::windows::audio_services;
+
+/// No audio services on this platform: the session simply has no audio channel.
+#[cfg(not(any(target_os = "linux", windows)))]
 pub fn audio_services(_ctx: &crate::services::ServiceCtx) -> Vec<Box<dyn crate::services::SessionService>> {
     Vec::new()
 }

@@ -1,8 +1,15 @@
 //! Clipboard sync (Phase 8): text and PNG images, both ways.
 //!
-//! The Wayland clipboard is read by polling and written through
-//! `wl-clipboard-rs` (wlr/ext data-control, which KWin implements). All of it
-//! runs on one worker thread per session, so `on_message` never blocks.
+//! Back ends, chosen per session by [`backend`]:
+//!
+//! * Wayland with the data-control protocol (KDE, Sway, Hyprland, COSMIC):
+//!   read by polling and written through `wl-clipboard-rs`.
+//! * X11 sessions, and Wayland desktops without data-control (GNOME), through
+//!   X11 selections ([`super::clipboard_x11`]); on GNOME that is Xwayland's
+//!   clipboard, which Mutter keeps in step with the Wayland one.
+//! * Windows: the Win32 clipboard ([`super::clipboard_windows`]).
+//!
+//! All of it runs on one worker thread per session, so `on_message` never blocks.
 //!
 //! Loop prevention: [`SyncState`] remembers a hash of the content last seen in
 //! either direction. Content that just arrived from the phone is written to
@@ -146,18 +153,54 @@ fn run_worker(
     }
 }
 
-/// Off Linux there is no clipboard backend yet: nothing is read or written.
-#[cfg(not(target_os = "linux"))]
+/// Used when no back end can be had: nothing is read or written.
 struct NoClipboard;
 
-#[cfg(not(target_os = "linux"))]
 impl ClipboardBackend for NoClipboard {
     fn read(&mut self) -> Option<ClipContent> {
         None
     }
     fn write(&mut self, _c: &ClipContent) -> Result<(), String> {
-        Err("clipboard sync is not available on this platform".into())
+        Err("clipboard sync is not available on this desktop".into())
     }
+}
+
+/// Whether the Wayland compositor offers a data-control protocol.
+#[cfg(target_os = "linux")]
+fn wayland_data_control() -> bool {
+    use wl_clipboard_rs::paste::{get_mime_types, ClipboardType, Error, Seat};
+    !matches!(
+        get_mime_types(ClipboardType::Regular, Seat::Unspecified),
+        Err(Error::MissingProtocol { .. } | Error::WaylandConnection(_))
+    )
+}
+
+/// The clipboard back end for this session, or why there is none.
+pub fn backend() -> Result<Box<dyn ClipboardBackend>, String> {
+    #[cfg(target_os = "linux")]
+    {
+        use crate::display::model::SessionType;
+        let session = crate::display::env::current_session();
+        if session == SessionType::Wayland && wayland_data_control() {
+            return Ok(Box::new(WaylandClipboard::new()));
+        }
+        // X11, or a Wayland compositor without data-control: Xwayland's clipboard.
+        return match super::clipboard_x11::X11Clipboard::connect() {
+            Ok(x) => {
+                if session == SessionType::Wayland {
+                    log::info!("Clipboard: no Wayland data-control here; using the X11 clipboard through Xwayland");
+                }
+                Ok(Box::new(x))
+            }
+            Err(e) => Err(format!("no clipboard access on this desktop ({e})")),
+        };
+    }
+    #[cfg(windows)]
+    {
+        return Ok(Box::new(super::clipboard_windows::WindowsClipboard::new()));
+    }
+    #[allow(unreachable_code)]
+    Err("clipboard sync is not available on this platform".into())
 }
 
 pub struct ClipboardService {
@@ -166,10 +209,10 @@ pub struct ClipboardService {
 
 impl ClipboardService {
     pub fn start(ctx: &ServiceCtx) -> Self {
-        #[cfg(target_os = "linux")]
-        let backend: Box<dyn ClipboardBackend> = Box::new(WaylandClipboard::new());
-        #[cfg(not(target_os = "linux"))]
-        let backend: Box<dyn ClipboardBackend> = Box::new(NoClipboard);
+        let backend = backend().unwrap_or_else(|e| {
+            log::warn!("Clipboard sync is off for this session: {e}");
+            Box::new(NoClipboard)
+        });
         Self::with_backend(backend, ctx.out.clone(), POLL)
     }
 

@@ -27,6 +27,9 @@ use tokio::sync::mpsc;
 
 pub mod battery;
 pub mod clipboard;
+pub mod clipboard_windows;
+#[cfg(target_os = "linux")]
+pub mod clipboard_x11;
 
 use crate::devices::{DeviceSettings, Role};
 use crate::protocol::wire::{
